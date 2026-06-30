@@ -22,6 +22,16 @@ WEEKLY_SPLIT = {
     "Sunday": "Arms + Shoulders + Forearms",
 }
 
+LEARNING_WEEKLY_PLAN = {
+    "Monday": ("AI Cohort + Cohort Assignment", "DSA + Revision"),
+    "Tuesday": ("System Design + AI Project", "DSA + Project Planning"),
+    "Wednesday": ("AI Cohort + AI Project", "DSA + Notes"),
+    "Thursday": ("Backend Deep Dive + System Design", "DSA + Backend Revision"),
+    "Friday": ("AI Cohort + Project Development", "Weekly Review / Light Reading"),
+    "Saturday": ("Project Building", "DSA + Cohort Revision"),
+    "Sunday": ("System Design + Backend", "Weekly Planning"),
+}
+
 PROFILE_SEED = {
     "name": "Rushikesh",
     "age": 24,
@@ -210,6 +220,18 @@ def initialize_health_tables() -> None:
                 weight_summary TEXT,
                 recovery_summary TEXT,
                 recommendations TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS learning_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                plan_type TEXT,
+                focus_area TEXT,
+                recommended_tasks TEXT,
+                reasoning TEXT,
+                estimated_minutes INTEGER DEFAULT 0,
+                priority TEXT,
                 created_at TEXT
             );
             """
@@ -953,6 +975,187 @@ def save_health_report(report: dict[str, Any]) -> dict[str, Any]:
     return {"saved": True, "health_report_id": cursor.lastrowid}
 
 
+def get_today_schedule() -> dict[str, Any]:
+    today = date.today()
+    day_name = today.strftime("%A")
+    slot1, slot2 = LEARNING_WEEKLY_PLAN.get(day_name, ("Deep study", "Light revision"))
+    return {
+        "date": today.isoformat(),
+        "day": day_name,
+        "slot_1_time": "9:30 AM - 12:30 PM",
+        "slot_1_default_focus": slot1,
+        "slot_1_minutes": 180,
+        "slot_2_time": "11:00 PM - 12:15 AM",
+        "slot_2_default_focus": slot2,
+        "slot_2_minutes": 75,
+        "night_slot_rule": "Keep Slot 2 lighter: revision, notes, planning, or 1 easy DSA problem.",
+    }
+
+
+def get_recent_daily_logs(limit: int = 7) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM daily_logs ORDER BY date DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_dsa_progress_summary() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM dsa_problems", conn)
+    if df.empty:
+        return {"total": 0, "solved": 0, "avg_confidence": 0, "weak_topics": [], "revision_due": 0}
+    today = pd.Timestamp(date.today())
+    revision_dates = pd.to_datetime(df["revision_due_date"], errors="coerce")
+    weak_df = df[(df["confidence"].fillna(0) <= 2) | (df["status"].fillna("") != "Solved")]
+    weak_topics = weak_df["topic"].fillna("Unknown").value_counts().head(5).index.tolist()
+    return {
+        "total": int(len(df)),
+        "solved": int((df["status"] == "Solved").sum()),
+        "avg_confidence": round(float(df["confidence"].fillna(0).mean()), 1),
+        "weak_topics": weak_topics,
+        "revision_due": int((revision_dates <= today).sum()),
+        "recent_topics": df.sort_values("date").tail(5)["topic"].fillna("").tolist(),
+    }
+
+
+def get_ai_cohort_summary() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM ai_cohort", conn)
+    if df.empty:
+        return {"modules": 0, "avg_completion": 0, "weak_modules": [], "next_modules": []}
+    weak = df[(df["confidence"].fillna(0) <= 2) | (df["blockers"].fillna("") != "")]
+    next_df = df[df["status"].fillna("").isin(["Not Started", "In Progress"])].head(3)
+    return {
+        "modules": int(len(df)),
+        "avg_completion": round(float(df["completion_percentage"].fillna(0).mean()), 1),
+        "completed": int((df["status"] == "Completed").sum()),
+        "weak_modules": weak["module_name"].head(5).tolist(),
+        "next_modules": next_df["module_name"].tolist(),
+    }
+
+
+def get_system_design_summary() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM system_design_course", conn)
+    if df.empty:
+        return {"sections": 0, "completed": 0, "progress": 0, "weak_sections": [], "next_sections": []}
+    total = len(df)
+    completed = int((df["status"] == "Completed").sum())
+    weak = df[(df["confidence"].fillna(0) <= 2) & (df["status"].fillna("") != "Completed")]
+    next_df = df[df["status"].fillna("").isin(["Not Started", "In Progress"])].sort_values("section_number").head(3)
+    return {
+        "sections": int(total),
+        "completed": completed,
+        "progress": int(completed / total * 100) if total else 0,
+        "avg_confidence": round(float(df["confidence"].fillna(0).mean()), 1),
+        "weak_sections": weak.sort_values("section_number")["section_name"].head(5).tolist(),
+        "next_sections": next_df["section_name"].tolist(),
+    }
+
+
+def get_backend_course_summary() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM backend_course", conn)
+    if df.empty:
+        return {"topics": 0, "completed": 0, "progress": 0, "weak_topics": [], "next_topics": []}
+    total = len(df)
+    completed = int((df["status"] == "Completed").sum())
+    weak = df[(df["confidence"].fillna(0) <= 2) | ((df["video_done"].fillna(0) == 1) & (df["mini_implementation_done"].fillna(0) == 0))]
+    next_df = df[df["status"].fillna("").isin(["Not Started", "In Progress", "Revising"])].head(5)
+    return {
+        "topics": int(total),
+        "completed": completed,
+        "progress": int(completed / total * 100) if total else 0,
+        "avg_confidence": round(float(df["confidence"].fillna(0).mean()), 1),
+        "weak_topics": weak["topic"].head(6).tolist(),
+        "next_topics": next_df["topic"].tolist(),
+    }
+
+
+def get_project_progress_summary() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM projects", conn)
+    if df.empty:
+        return {"projects": 0, "avg_progress": 0, "active_projects": [], "project_focus": ""}
+    active = df[df["status"].fillna("").isin(["Not Started", "In Progress", "Blocked"])]
+    focus_row = active.sort_values("progress_percentage").head(1)
+    project_focus = ""
+    if not focus_row.empty:
+        row = focus_row.iloc[0]
+        project_focus = f"{row['project_name']}: {row.get('current_task') or row.get('next_task') or 'move progress forward'}"
+    return {
+        "projects": int(len(df)),
+        "avg_progress": round(float(df["progress_percentage"].fillna(0).mean()), 1),
+        "active_projects": active["project_name"].head(5).tolist(),
+        "blocked_projects": df[df["blockers"].fillna("") != ""]["project_name"].head(5).tolist(),
+        "project_focus": project_focus,
+    }
+
+
+def get_revision_due_items() -> dict[str, Any]:
+    today = pd.Timestamp(date.today())
+    due: dict[str, list[dict[str, Any]]] = {"dsa": [], "backend_course": [], "system_design_course": []}
+    with connect() as conn:
+        dsa = pd.read_sql_query("SELECT problem_name, topic, difficulty, revision_due_date FROM dsa_problems", conn)
+        backend = pd.read_sql_query("SELECT topic, phase, confidence, revision_due_date FROM backend_course", conn)
+        system_design = pd.read_sql_query(
+            "SELECT section_name, phase, confidence, revision_due_date FROM system_design_course",
+            conn,
+        )
+    if not dsa.empty:
+        dsa_dates = pd.to_datetime(dsa["revision_due_date"], errors="coerce")
+        due["dsa"] = dsa[dsa_dates <= today].head(10).to_dict("records")
+    if not backend.empty:
+        backend_dates = pd.to_datetime(backend["revision_due_date"], errors="coerce")
+        due["backend_course"] = backend[backend_dates <= today].head(10).to_dict("records")
+    if not system_design.empty:
+        system_dates = pd.to_datetime(system_design["revision_due_date"], errors="coerce")
+        due["system_design_course"] = system_design[system_dates <= today].head(10).to_dict("records")
+    due["total_due"] = sum(len(items) for key, items in due.items() if isinstance(items, list))
+    return due
+
+
+def save_learning_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                plan_type TEXT,
+                focus_area TEXT,
+                recommended_tasks TEXT,
+                reasoning TEXT,
+                estimated_minutes INTEGER DEFAULT 0,
+                priority TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO learning_plans (
+                date, plan_type, focus_area, recommended_tasks, reasoning,
+                estimated_minutes, priority, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan.get("date") or date.today().isoformat(),
+                plan.get("plan_type", "daily"),
+                plan.get("focus_area", ""),
+                plan.get("recommended_tasks", ""),
+                plan.get("reasoning", ""),
+                int(plan.get("estimated_minutes", 0) or 0),
+                plan.get("priority", "Medium"),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "learning_plan_id": cursor.lastrowid}
+
+
 def save_chat_message(bot_type: str, role: str, content: str) -> None:
     initialize_health_tables()
     with connect() as conn:
@@ -1043,6 +1246,15 @@ TOOL_FUNCTIONS = {
     "calculate_weight_trend": calculate_weight_trend,
     "calculate_health_score": calculate_health_score,
     "save_health_report": save_health_report,
+    "get_today_schedule": get_today_schedule,
+    "get_recent_daily_logs": get_recent_daily_logs,
+    "get_dsa_progress_summary": get_dsa_progress_summary,
+    "get_ai_cohort_summary": get_ai_cohort_summary,
+    "get_system_design_summary": get_system_design_summary,
+    "get_backend_course_summary": get_backend_course_summary,
+    "get_project_progress_summary": get_project_progress_summary,
+    "get_revision_due_items": get_revision_due_items,
+    "save_learning_plan": save_learning_plan,
 }
 
 

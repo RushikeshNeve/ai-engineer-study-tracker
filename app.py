@@ -17,11 +17,15 @@ from tools import (
     calculate_weekly_avg_protein,
     calculate_weekly_workout_count,
     calculate_weight_trend,
+    get_backend_course_summary,
+    get_dsa_progress_summary,
     get_fitness_profile,
+    get_project_progress_summary,
     get_recent_chat_messages,
     get_recent_diet_logs,
     get_recent_gym_sessions,
     get_recent_tool_logs,
+    get_revision_due_items,
     get_weight_logs,
     initialize_health_tables,
     save_diet_log,
@@ -77,6 +81,7 @@ TABLES = [
     "projects",
     "notes",
     "weekly_reviews",
+    "learning_plans",
 ]
 
 COURSE_LINK = "https://youtu.be/0Rwb4Xmlcwc?si=TDG5hZDWn0HAriFR"
@@ -375,6 +380,18 @@ def init_db() -> None:
                 burnout_level INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS learning_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                plan_type TEXT,
+                focus_area TEXT,
+                recommended_tasks TEXT,
+                reasoning TEXT,
+                estimated_minutes INTEGER DEFAULT 0,
+                priority TEXT,
+                created_at TEXT
+            );
             """
         )
         ensure_weekly_backend_columns(conn)
@@ -655,6 +672,7 @@ def dashboard() -> None:
     projects = read_table("projects")
     backend_course = read_table("backend_course")
     system_design_course = read_table("system_design_course")
+    learning_plans = read_table("learning_plans")
 
     if not daily.empty:
         daily["date_dt"] = pd.to_datetime(daily["date"], errors="coerce")
@@ -678,6 +696,15 @@ def dashboard() -> None:
     backend_metrics = backend_course_metrics(backend_course, today)
     backend_week = backend_week_stats(backend_course, week_start, week_end)
     system_design_metrics = system_design_course_metrics(system_design_course, today)
+    latest_learning_plan = pd.Series(dtype=object)
+    if not learning_plans.empty:
+        today_plans = learning_plans[learning_plans["date"] == today.isoformat()]
+        source_plans = today_plans if not today_plans.empty else learning_plans
+        latest_learning_plan = source_plans.sort_values(["date", "id"]).iloc[-1]
+    dsa_summary = get_dsa_progress_summary()
+    backend_summary = get_backend_course_summary()
+    revision_due_items = get_revision_due_items()
+    project_summary = get_project_progress_summary()
 
     st.subheader("This Week")
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -691,6 +718,23 @@ def dashboard() -> None:
         metric_card("Project Progress", f"{project_progress}%")
     with m5:
         metric_card("Consistency", f"{consistency}/7")
+
+    st.subheader("Learning Coach")
+    l1, l2, l3, l4 = st.columns(4)
+    weak_topics = ", ".join((dsa_summary.get("weak_topics") or [])[:3] + (backend_summary.get("weak_topics") or [])[:3])
+    with l1:
+        metric_card("Weekly Study Consistency", f"{consistency}/7")
+    with l2:
+        metric_card("Revision Due", revision_due_items.get("total_due", 0))
+    with l3:
+        metric_card("Weak Topics", weak_topics or "None logged")
+    with l4:
+        metric_card("Project Focus", project_summary.get("project_focus") or "No active project")
+    if latest_learning_plan.empty:
+        st.caption("Generate a Learning Coach Agent plan to show today's AI-generated plan here.")
+    else:
+        st.write(f"**Today's AI Plan:** {latest_learning_plan.get('focus_area', '')}")
+        st.caption(str(latest_learning_plan.get("recommended_tasks", "")))
 
     st.subheader("Backend Course")
     b1, b2, b3, b4, b5 = st.columns(5)
@@ -1517,6 +1561,59 @@ def weekly_review_page() -> None:
     show_dataframe(read_table("weekly_reviews"))
 
 
+def learning_coach_agent_page() -> None:
+    st.title("Learning Coach Agent")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    plans_df = read_table("learning_plans")
+    dsa_summary = get_dsa_progress_summary()
+    backend_summary = get_backend_course_summary()
+    revision_due_items = get_revision_due_items()
+    project_summary = get_project_progress_summary()
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("DSA Solved", dsa_summary.get("solved", 0))
+    with c2:
+        metric_card("Backend Progress", f"{backend_summary.get('progress', 0)}%")
+    with c3:
+        metric_card("Revision Due", revision_due_items.get("total_due", 0))
+    with c4:
+        metric_card("Project Focus", project_summary.get("project_focus") or "No active project")
+
+    if st.button("Generate Today's Study Plan", use_container_width=True):
+        with st.spinner("Calling learning tools and generating today's plan..."):
+            response = run_health_agent("learning_coach", "Generate today's study plan with Slot 1 and Slot 2.")
+        st.session_state.learning_coach_last_response = response
+
+    prompt = st.chat_input("Ask for a study plan, weak-area review, or revision plan")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling learning coach tools..."):
+                response = run_health_agent("learning_coach", prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("learning_coach_last_response", "")
+    if last_response:
+        st.subheader("Latest Generated Plan")
+        st.write(last_response)
+
+    st.subheader("Recent Learning Coach Messages")
+    for message in get_recent_chat_messages("learning_coach", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Saved Learning Plans")
+    show_dataframe(plans_df, "No learning plans saved yet.")
+
+    with st.expander("Recent learning coach tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("learning_coach", 40))
+        show_dataframe(logs, "No learning coach tool logs yet.")
+
+
 def health_dashboard_page() -> None:
     st.title("Health Dashboard")
     profile = get_fitness_profile()
@@ -2109,6 +2206,7 @@ PAGES = {
     "Projects Tracker": projects_page,
     "Notes / Learnings": notes_page,
     "Weekly Review": weekly_review_page,
+    "Learning Coach Agent": learning_coach_agent_page,
     "Export Data": export_page,
     "Health Dashboard": health_dashboard_page,
     "Health Manager Agent": health_manager_agent_page,
@@ -2131,6 +2229,7 @@ STUDY_PAGES = [
     "Projects Tracker",
     "Notes / Learnings",
     "Weekly Review",
+    "Learning Coach Agent",
     "Export Data",
 ]
 

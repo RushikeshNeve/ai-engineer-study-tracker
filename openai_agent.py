@@ -325,8 +325,93 @@ HEALTH_MANAGER_TOOLS = [
     },
 ]
 
+LEARNING_COACH_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_today_schedule",
+            "description": "Get today's fixed study schedule and default Slot 1 / Slot 2 focus.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_daily_logs",
+            "description": "Read recent daily study logs from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dsa_progress_summary",
+            "description": "Summarize DSA progress, weak topics, confidence, and revision load.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ai_cohort_summary",
+            "description": "Summarize AI cohort completion, weak modules, and next modules.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_design_summary",
+            "description": "Summarize system design course progress, weak sections, and next sections.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_backend_course_summary",
+            "description": "Summarize backend course progress, weak topics, and next topics.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_progress_summary",
+            "description": "Summarize project progress, active projects, blockers, and recommended project focus.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_revision_due_items",
+            "description": "Read DSA, backend, and system design items whose revision due date is today or overdue.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_learning_plan",
+            "description": "Save the generated learning plan to SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"plan": {"type": "object"}},
+                "required": ["plan"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
 
-def run_health_agent(bot_type: Literal["gym", "diet", "health_manager"], user_input: str) -> str:
+
+def run_health_agent(bot_type: Literal["gym", "diet", "health_manager", "learning_coach"], user_input: str) -> str:
     if not os.getenv("OPENAI_API_KEY"):
         return "OpenAI API key not found. Please add OPENAI_API_KEY to your environment."
 
@@ -337,16 +422,19 @@ def run_health_agent(bot_type: Literal["gym", "diet", "health_manager"], user_in
     elif bot_type == "diet":
         tools = DIET_TOOLS
         system_prompt = diet_prompt()
-    else:
+    elif bot_type == "health_manager":
         tools = HEALTH_MANAGER_TOOLS
         system_prompt = health_manager_prompt()
+    else:
+        tools = LEARNING_COACH_TOOLS
+        system_prompt = learning_coach_prompt()
 
     save_chat_message(bot_type, "user", user_input)
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(get_recent_chat_messages(bot_type, 10))
     last_saved_gym_session_id = None
 
-    for _ in range(8):
+    for _ in range(10):
         response = client.chat.completions.create(
             model=MODEL,
             messages=messages,
@@ -487,4 +575,51 @@ Final answer structure:
 - What to log next.
 
 Do not claim a health report was saved unless save_health_report returned saved=true.
+"""
+
+
+def learning_coach_prompt() -> str:
+    return """
+You are Rushikesh's Learning Coach Agent for his Backend + AI Engineer transition.
+You must use tools before giving a study plan. Do not generate a plan from memory only.
+
+For every plan request:
+1. Call get_today_schedule().
+2. Call get_recent_daily_logs(limit=7).
+3. Call get_dsa_progress_summary().
+4. Call get_ai_cohort_summary().
+5. Call get_system_design_summary().
+6. Call get_backend_course_summary().
+7. Call get_project_progress_summary().
+8. Call get_revision_due_items().
+9. Call save_learning_plan(plan).
+
+The saved plan object must include:
+- date
+- plan_type
+- focus_area
+- recommended_tasks
+- reasoning
+- estimated_minutes
+- priority
+
+Planning rules:
+- Respect Slot 1: 9:30 AM - 12:30 PM, deep work, about 180 minutes.
+- Respect Slot 2: 11:00 PM - 12:15 AM, light work, about 75 minutes.
+- Keep Slot 2 lighter: revision, notes, planning, or one easy DSA problem.
+- Balance AI Cohort, DSA, System Design, Backend, and Projects across the week.
+- Prioritize revision due items and weak areas, but do not overload the day.
+- Recommend a concrete Slot 1 plan and Slot 2 plan with time boxes.
+- Include project focus when an active project needs progress.
+
+Final answer structure:
+- Saved plan: plan id if available.
+- Slot 1: time-boxed tasks.
+- Slot 2: lighter time-boxed tasks.
+- Weak areas detected.
+- Revision due.
+- Project focus.
+- Why this plan.
+
+Do not claim a plan was saved unless save_learning_plan returned saved=true.
 """
