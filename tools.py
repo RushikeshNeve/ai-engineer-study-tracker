@@ -199,6 +199,19 @@ def initialize_health_tables() -> None:
                 error TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS health_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                report_type TEXT,
+                health_score REAL DEFAULT 0,
+                workout_summary TEXT,
+                diet_summary TEXT,
+                weight_summary TEXT,
+                recovery_summary TEXT,
+                recommendations TEXT,
+                created_at TEXT
+            );
             """
         )
         ensure_fitness_profile_columns(conn)
@@ -750,6 +763,196 @@ def estimate_diet_macros(raw_diet_text: str) -> dict[str, Any]:
     }
 
 
+def current_week_bounds() -> tuple[date, date]:
+    today = date.today()
+    start = today - timedelta(days=today.weekday())
+    return start, start + timedelta(days=6)
+
+
+def calculate_weekly_workout_count() -> dict[str, Any]:
+    initialize_health_tables()
+    week_start, week_end = current_week_bounds()
+    previous_start = week_start - timedelta(days=7)
+    previous_end = week_start - timedelta(days=1)
+    with connect() as conn:
+        current = conn.execute(
+            """
+            SELECT COUNT(*) FROM gym_sessions
+            WHERE session_date BETWEEN ? AND ?
+            """,
+            (week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()[0]
+        previous = conn.execute(
+            """
+            SELECT COUNT(*) FROM gym_sessions
+            WHERE session_date BETWEEN ? AND ?
+            """,
+            (previous_start.isoformat(), previous_end.isoformat()),
+        ).fetchone()[0]
+    return {
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "workout_count": int(current),
+        "previous_week_workout_count": int(previous),
+        "change_vs_previous_week": int(current - previous),
+    }
+
+
+def calculate_weekly_avg_protein() -> dict[str, Any]:
+    initialize_health_tables()
+    week_start, week_end = current_week_bounds()
+    previous_start = week_start - timedelta(days=7)
+    previous_end = week_start - timedelta(days=1)
+    with connect() as conn:
+        current = conn.execute(
+            "SELECT AVG(protein_g) FROM diet_logs WHERE log_date BETWEEN ? AND ?",
+            (week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()[0]
+        previous = conn.execute(
+            "SELECT AVG(protein_g) FROM diet_logs WHERE log_date BETWEEN ? AND ?",
+            (previous_start.isoformat(), previous_end.isoformat()),
+        ).fetchone()[0]
+    current_avg = round(float(current or 0), 1)
+    previous_avg = round(float(previous or 0), 1)
+    return {
+        "avg_protein_g": current_avg,
+        "previous_week_avg_protein_g": previous_avg,
+        "target_min_g": 130,
+        "target_max_g": 150,
+        "status": "on_target" if 130 <= current_avg <= 150 else "low" if current_avg < 130 else "high",
+    }
+
+
+def calculate_weekly_avg_calories() -> dict[str, Any]:
+    initialize_health_tables()
+    week_start, week_end = current_week_bounds()
+    previous_start = week_start - timedelta(days=7)
+    previous_end = week_start - timedelta(days=1)
+    with connect() as conn:
+        current = conn.execute(
+            "SELECT AVG(calories), AVG(estimated_deficit_calories) FROM diet_logs WHERE log_date BETWEEN ? AND ?",
+            (week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()
+        previous = conn.execute(
+            "SELECT AVG(calories), AVG(estimated_deficit_calories) FROM diet_logs WHERE log_date BETWEEN ? AND ?",
+            (previous_start.isoformat(), previous_end.isoformat()),
+        ).fetchone()
+    avg_calories = round(float(current[0] or 0), 1)
+    avg_deficit = round(float(current[1] or 0), 1)
+    return {
+        "avg_calories": avg_calories,
+        "avg_deficit_calories": avg_deficit,
+        "previous_week_avg_calories": round(float(previous[0] or 0), 1),
+        "previous_week_avg_deficit_calories": round(float(previous[1] or 0), 1),
+        "risk": "too_low" if 0 < avg_calories < 1800 else "reasonable",
+    }
+
+
+def calculate_weekly_avg_steps() -> dict[str, Any]:
+    initialize_health_tables()
+    week_start, week_end = current_week_bounds()
+    with connect() as conn:
+        weight_steps = conn.execute(
+            "SELECT AVG(steps) FROM weight_logs WHERE log_date BETWEEN ? AND ? AND steps > 0",
+            (week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()[0]
+        gym_steps = conn.execute(
+            "SELECT AVG(steps) FROM gym_sessions WHERE session_date BETWEEN ? AND ? AND steps > 0",
+            (week_start.isoformat(), week_end.isoformat()),
+        ).fetchone()[0]
+    avg_steps = round(float(weight_steps or gym_steps or 0), 1)
+    return {
+        "avg_steps": avg_steps,
+        "target_steps": 10000,
+        "status": "on_target" if avg_steps >= 10000 else "low",
+    }
+
+
+def calculate_weight_trend() -> dict[str, Any]:
+    initialize_health_tables()
+    logs = get_weight_logs(14)
+    if len(logs) < 2:
+        return {"trend": "not_enough_data", "latest_weight_kg": logs[0]["weight_kg"] if logs else 0, "change_kg": 0}
+    df = pd.DataFrame(logs)
+    df["log_date_dt"] = pd.to_datetime(df["log_date"], errors="coerce")
+    df = df.sort_values(["log_date_dt", "id"]).dropna(subset=["weight_kg"])
+    if len(df) < 2:
+        return {"trend": "not_enough_data", "latest_weight_kg": 0, "change_kg": 0}
+    first = float(df.iloc[0]["weight_kg"] or 0)
+    latest = float(df.iloc[-1]["weight_kg"] or 0)
+    change = round(latest - first, 2)
+    trend = "down" if change < -0.2 else "up" if change > 0.2 else "stable"
+    return {
+        "trend": trend,
+        "latest_weight_kg": latest,
+        "oldest_weight_kg": first,
+        "change_kg": change,
+        "days_observed": int((df.iloc[-1]["log_date_dt"] - df.iloc[0]["log_date_dt"]).days),
+    }
+
+
+def calculate_health_score() -> dict[str, Any]:
+    workouts = calculate_weekly_workout_count()
+    protein = calculate_weekly_avg_protein()
+    calories = calculate_weekly_avg_calories()
+    steps = calculate_weekly_avg_steps()
+    weight = calculate_weight_trend()
+
+    score = 100
+    risks: list[str] = []
+    if workouts["workout_count"] < 3:
+        score -= 18
+        risks.append("low workout frequency")
+    if protein["avg_protein_g"] and protein["avg_protein_g"] < 130:
+        score -= 20
+        risks.append("protein below 130g/day")
+    if 0 < calories["avg_calories"] < 1800:
+        score -= 15
+        risks.append("calories may be too low for muscle retention")
+    if steps["avg_steps"] and steps["avg_steps"] < 8000:
+        score -= 10
+        risks.append("steps below fat-loss target")
+    if weight["trend"] == "up":
+        score -= 8
+        risks.append("weight trending up")
+
+    return {
+        "health_score": max(score, 0),
+        "risks": risks,
+        "workouts": workouts,
+        "protein": protein,
+        "calories": calories,
+        "steps": steps,
+        "weight": weight,
+    }
+
+
+def save_health_report(report: dict[str, Any]) -> dict[str, Any]:
+    initialize_health_tables()
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO health_reports (
+                date, report_type, health_score, workout_summary, diet_summary,
+                weight_summary, recovery_summary, recommendations, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report.get("date") or date.today().isoformat(),
+                report.get("report_type", "daily"),
+                report.get("health_score", 0),
+                report.get("workout_summary", ""),
+                report.get("diet_summary", ""),
+                report.get("weight_summary", ""),
+                report.get("recovery_summary", ""),
+                report.get("recommendations", ""),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "health_report_id": cursor.lastrowid}
+
+
 def save_chat_message(bot_type: str, role: str, content: str) -> None:
     initialize_health_tables()
     with connect() as conn:
@@ -833,6 +1036,13 @@ TOOL_FUNCTIONS = {
     "save_weight_log": save_weight_log,
     "get_diet_progress_summary": get_diet_progress_summary,
     "estimate_diet_macros": estimate_diet_macros,
+    "calculate_weekly_workout_count": calculate_weekly_workout_count,
+    "calculate_weekly_avg_protein": calculate_weekly_avg_protein,
+    "calculate_weekly_avg_calories": calculate_weekly_avg_calories,
+    "calculate_weekly_avg_steps": calculate_weekly_avg_steps,
+    "calculate_weight_trend": calculate_weight_trend,
+    "calculate_health_score": calculate_health_score,
+    "save_health_report": save_health_report,
 }
 
 

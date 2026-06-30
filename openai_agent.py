@@ -222,14 +222,124 @@ DIET_TOOLS = [
     },
 ]
 
+HEALTH_MANAGER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_gym_sessions",
+            "description": "Read recent gym sessions from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_diet_logs",
+            "description": "Read recent diet logs from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weight_logs",
+            "description": "Read recent weight and steps logs from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weekly_workout_count",
+            "description": "Calculate current and previous week workout counts.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weekly_avg_protein",
+            "description": "Calculate current and previous week average protein.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weekly_avg_calories",
+            "description": "Calculate weekly average calories and deficit.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weekly_avg_steps",
+            "description": "Calculate weekly average steps.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weight_trend",
+            "description": "Calculate recent weight trend from SQLite logs.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_health_score",
+            "description": "Calculate a health score and risk flags from workout, diet, steps, and weight data.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_health_report",
+            "description": "Save a generated daily or weekly health report to SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"report": {"type": "object"}},
+                "required": ["report"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
 
-def run_health_agent(bot_type: Literal["gym", "diet"], user_input: str) -> str:
+
+def run_health_agent(bot_type: Literal["gym", "diet", "health_manager"], user_input: str) -> str:
     if not os.getenv("OPENAI_API_KEY"):
         return "OpenAI API key not found. Please add OPENAI_API_KEY to your environment."
 
     client = OpenAI()
-    tools = GYM_TOOLS if bot_type == "gym" else DIET_TOOLS
-    system_prompt = gym_prompt() if bot_type == "gym" else diet_prompt()
+    if bot_type == "gym":
+        tools = GYM_TOOLS
+        system_prompt = gym_prompt()
+    elif bot_type == "diet":
+        tools = DIET_TOOLS
+        system_prompt = diet_prompt()
+    else:
+        tools = HEALTH_MANAGER_TOOLS
+        system_prompt = health_manager_prompt()
 
     save_chat_message(bot_type, "user", user_input)
     messages = [{"role": "system", "content": system_prompt}]
@@ -332,4 +442,49 @@ When the user enters meals:
 Be specific with numbers from tool results. If a value is estimated, label it as estimated.
 
 Do not claim a diet log was saved unless save_diet_log returned saved=true.
+"""
+
+
+def health_manager_prompt() -> str:
+    return """
+You are Rushikesh's Health Manager Agent for fat loss with muscle retention.
+You must use tools before giving a report. Do not generate a report from memory only.
+
+For every daily or weekly report request:
+1. Call get_recent_gym_sessions(limit=14).
+2. Call get_recent_diet_logs(limit=14).
+3. Call get_weight_logs(limit=14).
+4. Call calculate_weekly_workout_count().
+5. Call calculate_weekly_avg_protein().
+6. Call calculate_weekly_avg_calories().
+7. Call calculate_weekly_avg_steps().
+8. Call calculate_weight_trend().
+9. Call calculate_health_score().
+10. Call save_health_report(report) with report_type daily or weekly.
+
+The saved report object must include:
+- date
+- report_type
+- health_score
+- workout_summary
+- diet_summary
+- weight_summary
+- recovery_summary
+- recommendations
+
+Report requirements:
+- Compare current week with previous logs when tool data is available.
+- Highlight risks: low protein, too-low calories, poor recovery, missed steps, excessive volume, or rising weight.
+- Give practical recommendations for fat loss with muscle retention.
+- Use specific numbers from tool results.
+- If data is missing, say what needs to be logged next.
+
+Final answer structure:
+- Saved report: report id if available, type, health score.
+- Weekly snapshot: workouts, protein, calories, deficit, steps, weight trend.
+- Risks.
+- Recommendations for the next 24-48 hours.
+- What to log next.
+
+Do not claim a health report was saved unless save_health_report returned saved=true.
 """

@@ -13,6 +13,10 @@ import streamlit as st
 from openai_agent import run_health_agent
 from tools import (
     WEEKLY_SPLIT,
+    calculate_health_score,
+    calculate_weekly_avg_protein,
+    calculate_weekly_workout_count,
+    calculate_weight_trend,
     get_fitness_profile,
     get_recent_chat_messages,
     get_recent_diet_logs,
@@ -67,6 +71,7 @@ TABLES = [
     "gym_exercises",
     "diet_logs",
     "weight_logs",
+    "health_reports",
     "chatbot_messages",
     "chatbot_tool_logs",
     "projects",
@@ -1518,6 +1523,7 @@ def health_dashboard_page() -> None:
     gym_df = read_table("gym_sessions")
     diet_df = read_table("diet_logs")
     weight_df = read_table("weight_logs")
+    reports_df = read_table("health_reports")
     today = date.today()
     week_start, week_end = current_week_range(today)
 
@@ -1557,6 +1563,18 @@ def health_dashboard_page() -> None:
             latest_gym_analysis = analyzed.sort_values(["session_date", "id"]).iloc[-1]["analysis"]
     latest_gym_analysis = latest_gym_analysis or get_latest_bot_message("gym")
     latest_diet_analysis = get_latest_bot_message("diet")
+    latest_recommendation = ""
+    latest_health_score = 0
+    if not reports_df.empty:
+        latest_report = reports_df.sort_values(["date", "id"]).iloc[-1]
+        latest_health_score = int(float(latest_report.get("health_score", 0) or 0))
+        latest_recommendation = str(latest_report.get("recommendations", "") or "")
+
+    workout_summary = calculate_weekly_workout_count()
+    protein_summary = calculate_weekly_avg_protein()
+    weight_trend = calculate_weight_trend()
+    if not latest_health_score:
+        latest_health_score = int(calculate_health_score().get("health_score", 0))
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1577,6 +1595,18 @@ def health_dashboard_page() -> None:
         metric_card("Steps Average", steps_avg)
     with c4:
         metric_card("Diet Logs", len(diet_df))
+
+    st.subheader("Health Manager")
+    h1, h2, h3, h4 = st.columns(4)
+    with h1:
+        metric_card("Latest Health Score", latest_health_score)
+    with h2:
+        metric_card("Weekly Workouts", workout_summary.get("workout_count", 0))
+    with h3:
+        metric_card("Avg Protein", f"{protein_summary.get('avg_protein_g', 0):.0f} g")
+    with h4:
+        metric_card("Weight Trend", weight_trend.get("trend", "not enough data"))
+    st.caption(latest_recommendation or "Generate a Health Manager Agent report to see the latest recommendation here.")
 
     if not diet_df.empty:
         latest_diet = diet_df.sort_values(["log_date", "id"]).iloc[-1]
@@ -1950,6 +1980,66 @@ def diet_coach_bot_page() -> None:
         show_dataframe(logs, "No diet tool logs yet.")
 
 
+def health_manager_agent_page() -> None:
+    st.title("Health Manager Agent")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    reports_df = read_table("health_reports")
+    score_summary = calculate_health_score()
+    workout_summary = calculate_weekly_workout_count()
+    protein_summary = calculate_weekly_avg_protein()
+    weight_summary = calculate_weight_trend()
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Health Score", score_summary.get("health_score", 0))
+    with c2:
+        metric_card("Weekly Workouts", workout_summary.get("workout_count", 0))
+    with c3:
+        metric_card("Avg Protein", f"{protein_summary.get('avg_protein_g', 0):.0f} g")
+    with c4:
+        metric_card("Weight Trend", weight_summary.get("trend", "not enough data"))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Generate Daily Report", use_container_width=True):
+            with st.spinner("Calling health tools and generating daily report..."):
+                response = run_health_agent("health_manager", "Generate today's daily health report.")
+            st.session_state.health_manager_last_response = response
+    with c2:
+        if st.button("Generate Weekly Report", use_container_width=True):
+            with st.spinner("Calling health tools and generating weekly report..."):
+                response = run_health_agent("health_manager", "Generate this week's health report.")
+            st.session_state.health_manager_last_response = response
+
+    prompt = st.chat_input("Ask for a health report or risk review")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling health manager tools..."):
+                response = run_health_agent("health_manager", prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("health_manager_last_response", "")
+    if last_response:
+        st.subheader("Latest Generated Report")
+        st.write(last_response)
+
+    st.subheader("Recent Health Manager Messages")
+    for message in get_recent_chat_messages("health_manager", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Saved Health Reports")
+    show_dataframe(reports_df, "No health reports saved yet.")
+
+    with st.expander("Recent health manager tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("health_manager", 40))
+        show_dataframe(logs, "No health manager tool logs yet.")
+
+
 def weight_steps_tracker_page() -> None:
     st.title("Weight & Steps Tracker")
     with st.form("weight_steps_form", clear_on_submit=True):
@@ -2021,6 +2111,7 @@ PAGES = {
     "Weekly Review": weekly_review_page,
     "Export Data": export_page,
     "Health Dashboard": health_dashboard_page,
+    "Health Manager Agent": health_manager_agent_page,
     "Gym Tracker": gym_tracker_page,
     "Gym Coach Bot": gym_coach_bot_page,
     "Diet Tracker": diet_tracker_page,
@@ -2045,6 +2136,7 @@ STUDY_PAGES = [
 
 HEALTH_PAGES = [
     "Health Dashboard",
+    "Health Manager Agent",
     "Gym Tracker",
     "Gym Coach Bot",
     "Diet Tracker",
