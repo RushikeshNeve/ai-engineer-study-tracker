@@ -541,8 +541,225 @@ WEEKLY_REVIEW_TOOLS = [
     },
 ]
 
+PROJECT_MENTOR_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_projects",
+            "description": "Read all projects from SQLite.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_details",
+            "description": "Read one project's details by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_notes",
+            "description": "Read notes related to a project.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_project_progress",
+            "description": "Read recent project progress rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_related_learning_topics",
+            "description": "Read backend, system design, and AI cohort topics related to a project.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_project_roadmap",
+            "description": "Generate a deterministic roadmap scaffold for a project from SQLite details.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_next_tasks",
+            "description": "Generate next implementation tasks for a project from SQLite details.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_project_readme",
+            "description": "Generate a README improvement outline for a project.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_project_plan",
+            "description": "Save a generated project mentor plan to SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"plan": {"type": "object"}},
+                "required": ["plan"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+RESUME_INTERVIEW_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_project_portfolio_summary",
+            "description": "Summarize projects as an interview portfolio and readiness signal.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dsa_interview_readiness",
+            "description": "Calculate DSA interview readiness from solved problems, confidence, and weak topics.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_design_readiness",
+            "description": "Calculate system design interview readiness.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_backend_readiness",
+            "description": "Calculate backend interview readiness.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ai_cohort_summary",
+            "description": "Summarize AI cohort completion and weak modules.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_weekly_reviews",
+            "description": "Read recent weekly AI reviews.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 10}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_resume_bullets",
+            "description": "Generate resume bullet drafts from project data.",
+            "parameters": {
+                "type": "object",
+                "properties": {"project_id": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_interview_questions",
+            "description": "Generate mock interview questions for a topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {"topic": {"type": "string"}},
+                "required": ["topic"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_interview_session",
+            "description": "Save a mock interview session with questions, answers, feedback, and score.",
+            "parameters": {
+                "type": "object",
+                "properties": {"session": {"type": "object"}},
+                "required": ["session"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 def run_health_agent(
-    bot_type: Literal["gym", "diet", "health_manager", "learning_coach", "weekly_review"],
+    bot_type: Literal[
+        "gym",
+        "diet",
+        "health_manager",
+        "learning_coach",
+        "weekly_review",
+        "project_mentor",
+        "resume_interview",
+    ],
     user_input: str,
 ) -> str:
     if not os.getenv("OPENAI_API_KEY"):
@@ -561,9 +778,15 @@ def run_health_agent(
     elif bot_type == "learning_coach":
         tools = LEARNING_COACH_TOOLS
         system_prompt = learning_coach_prompt()
-    else:
+    elif bot_type == "weekly_review":
         tools = WEEKLY_REVIEW_TOOLS
         system_prompt = weekly_review_prompt()
+    elif bot_type == "project_mentor":
+        tools = PROJECT_MENTOR_TOOLS
+        system_prompt = project_mentor_prompt()
+    else:
+        tools = RESUME_INTERVIEW_TOOLS
+        system_prompt = resume_interview_prompt()
 
     save_chat_message(bot_type, "user", user_input)
     messages = [{"role": "system", "content": system_prompt}]
@@ -814,4 +1037,106 @@ Final answer structure:
 - Practical recommendations.
 
 Do not claim a weekly review was saved unless save_weekly_review returned saved=true.
+"""
+
+
+def project_mentor_prompt() -> str:
+    return """
+You are Rushikesh's Project Mentor Agent for backend, AI, and portfolio projects.
+You must use tools before giving project advice. Do not generate the plan from memory only.
+
+For every project mentor request:
+1. Call get_all_projects().
+2. Pick the project_id from the user's request. If no project is specified, choose the most active non-Done project from get_all_projects().
+3. Call get_project_details(project_id).
+4. Call get_project_notes(project_id).
+5. Call get_recent_project_progress(limit=5).
+6. Call get_related_learning_topics(project_id).
+7. Call generate_project_roadmap(project_id).
+8. Call generate_next_tasks(project_id).
+9. Call generate_project_readme(project_id).
+10. Call save_project_plan(plan).
+
+The saved plan object must include:
+- project_id
+- plan_type
+- roadmap
+- next_tasks
+- architecture_notes
+- risks
+- resume_angle
+
+Mentor requirements:
+- Generate a practical project roadmap.
+- Suggest next implementation tasks.
+- Identify missing portfolio features.
+- Suggest README improvements.
+- Link project work with backend, system design, and AI cohort learning.
+- Explain how to position the project on a resume.
+- Use concrete project data from tools.
+- If no projects exist, tell the user to create a project first and do not claim a plan was saved.
+
+Final answer structure:
+- Saved plan: plan id if available.
+- Project and current milestone.
+- Roadmap.
+- Next 3 tasks.
+- Architecture notes.
+- Missing portfolio features and risks.
+- README improvements.
+- Related learning topics.
+- Resume angle.
+
+Do not claim a project plan was saved unless save_project_plan returned saved=true.
+"""
+
+
+def resume_interview_prompt() -> str:
+    return """
+You are Rushikesh's Resume & Interview Coach Agent.
+You convert tracked progress into interview readiness for Backend SDE2 and AI Engineer roles.
+You must use tools before giving readiness, resume, or mock-interview feedback.
+
+For readiness or resume requests:
+1. Call get_project_portfolio_summary().
+2. Call get_dsa_interview_readiness().
+3. Call get_system_design_readiness().
+4. Call get_backend_readiness().
+5. Call get_ai_cohort_summary().
+6. Call get_recent_weekly_reviews(limit=4).
+7. Call generate_resume_bullets(project_id) when resume bullets are requested, or project_id can be omitted.
+
+For mock interview requests:
+1. Call the readiness tools above.
+2. Call generate_interview_questions(topic).
+3. If the user provided answers, evaluate them and call save_interview_session(session).
+4. If the user only requested questions, save a session with questions and empty user_answers.
+
+The saved session object must include:
+- date
+- interview_type
+- topic
+- questions
+- user_answers
+- feedback
+- score
+
+Assessment requirements:
+- Assess Backend SDE2 readiness using backend, system design, DSA, and project portfolio evidence.
+- Assess AI Engineer readiness using AI cohort progress, AI-related projects, notes, and weekly reviews.
+- Give a numeric readiness summary when possible.
+- Recommend weak areas to improve.
+- Generate resume bullets that are honest and based on tracked project data.
+- Generate practical mock interview questions.
+- Give feedback on answers with a score from 0-100 when answers are present.
+
+Final answer structure:
+- Readiness snapshot.
+- Resume bullets or mock questions, depending on the request.
+- Feedback and score if answers were provided.
+- Weak areas.
+- Next recommended mock interview.
+- Saved session id if save_interview_session returned saved=true.
+
+Do not claim an interview session was saved unless save_interview_session returned saved=true.
 """

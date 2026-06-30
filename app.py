@@ -85,6 +85,7 @@ TABLES = [
     "weekly_reviews",
     "learning_plans",
     "weekly_ai_reviews",
+    "project_plans",
 ]
 
 COURSE_LINK = "https://youtu.be/0Rwb4Xmlcwc?si=TDG5hZDWn0HAriFR"
@@ -411,6 +412,18 @@ def init_db() -> None:
                 recommendations TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS project_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                plan_type TEXT,
+                roadmap TEXT,
+                next_tasks TEXT,
+                architecture_notes TEXT,
+                risks TEXT,
+                resume_angle TEXT,
+                created_at TEXT
+            );
             """
         )
         ensure_weekly_backend_columns(conn)
@@ -693,6 +706,7 @@ def dashboard() -> None:
     system_design_course = read_table("system_design_course")
     learning_plans = read_table("learning_plans")
     weekly_ai_reviews = read_table("weekly_ai_reviews")
+    project_plans = read_table("project_plans")
 
     if not daily.empty:
         daily["date_dt"] = pd.to_datetime(daily["date"], errors="coerce")
@@ -730,6 +744,15 @@ def dashboard() -> None:
     latest_weekly_review = pd.Series(dtype=object)
     if not weekly_ai_reviews.empty:
         latest_weekly_review = weekly_ai_reviews.sort_values(["week_start", "id"]).iloc[-1]
+    active_project = pd.Series(dtype=object)
+    latest_project_plan = pd.Series(dtype=object)
+    if not projects.empty:
+        active_projects = projects[~projects["status"].fillna("").isin(["Done"])]
+        active_project = (active_projects if not active_projects.empty else projects).sort_values(["progress_percentage", "id"]).iloc[0]
+        if not project_plans.empty:
+            matching_plans = project_plans[project_plans["project_id"] == int(active_project["id"])]
+            if not matching_plans.empty:
+                latest_project_plan = matching_plans.sort_values("id").iloc[-1]
 
     st.subheader("This Week")
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -775,6 +798,21 @@ def dashboard() -> None:
         metric_card("Biggest Miss", latest_weekly_review.get("misses", "No AI review yet") if not latest_weekly_review.empty else "No AI review yet")
     if not latest_weekly_review.empty:
         st.caption(f"Next week focus: {latest_weekly_review.get('next_week_focus', '')}")
+
+    st.subheader("Project Mentor")
+    p1, p2, p3, p4, p5 = st.columns(5)
+    next_tasks_text = str(latest_project_plan.get("next_tasks", "") if not latest_project_plan.empty else active_project.get("next_task", "") if not active_project.empty else "")
+    next_tasks = [line.strip(" -0123456789.") for line in next_tasks_text.splitlines() if line.strip()]
+    with p1:
+        metric_card("Active Project", active_project.get("project_name", "No project") if not active_project.empty else "No project")
+    with p2:
+        metric_card("Current Milestone", active_project.get("current_task", "Not set") if not active_project.empty else "Not set")
+    with p3:
+        metric_card("Next 3 Tasks", "; ".join(next_tasks[:3]) if next_tasks else "Generate plan")
+    with p4:
+        metric_card("Project Risk", latest_project_plan.get("risks", "Generate plan") if not latest_project_plan.empty else active_project.get("blockers", "None") if not active_project.empty else "No project")
+    with p5:
+        metric_card("Resume Angle", latest_project_plan.get("resume_angle", "Generate plan") if not latest_project_plan.empty else "Generate plan")
 
     st.subheader("Backend Course")
     b1, b2, b3, b4, b5 = st.columns(5)
@@ -1466,6 +1504,70 @@ def projects_page() -> None:
             st.write(f"**{row['project_name']}** ({row['category']}) - {row['status']}")
             st.progress(int(row["progress_percentage"] or 0) / 100)
     show_dataframe(df)
+
+
+def project_mentor_agent_page() -> None:
+    st.title("Project Mentor Agent")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    projects_df = read_table("projects")
+    plans_df = read_table("project_plans")
+    if projects_df.empty:
+        st.info("Add a project in Projects Tracker first, then generate a mentor plan.")
+        show_dataframe(plans_df, "No project plans saved yet.")
+        return
+
+    project_options = {
+        f"{int(row['id'])} - {row['project_name']} ({row['status']})": int(row["id"])
+        for _, row in projects_df.sort_values(["status", "progress_percentage", "id"]).iterrows()
+    }
+    selected_label = st.selectbox("Project", list(project_options.keys()))
+    selected_project_id = project_options[selected_label]
+    selected_project = projects_df[projects_df["id"] == selected_project_id].iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Status", selected_project.get("status", ""))
+    with c2:
+        metric_card("Progress", f"{int(selected_project.get('progress_percentage', 0) or 0)}%")
+    with c3:
+        metric_card("Current Task", selected_project.get("current_task", "Not set"))
+    with c4:
+        metric_card("Next Task", selected_project.get("next_task", "Not set"))
+
+    if st.button("Generate Project Mentor Plan", use_container_width=True):
+        prompt = f"Generate a project mentor plan for project_id {selected_project_id}."
+        with st.spinner("Calling project mentor tools and generating plan..."):
+            response = run_health_agent("project_mentor", prompt)
+        st.session_state.project_mentor_last_response = response
+
+    prompt = st.chat_input("Ask for roadmap, next tasks, README, or resume positioning")
+    if prompt:
+        full_prompt = f"{prompt}\nProject id: {selected_project_id}."
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling project mentor tools..."):
+                response = run_health_agent("project_mentor", full_prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("project_mentor_last_response", "")
+    if last_response:
+        st.subheader("Latest Generated Plan")
+        st.write(last_response)
+
+    st.subheader("Recent Project Mentor Messages")
+    for message in get_recent_chat_messages("project_mentor", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Saved Project Plans")
+    show_dataframe(plans_df, "No project plans saved yet.")
+
+    with st.expander("Recent project mentor tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("project_mentor", 50))
+        show_dataframe(logs, "No project mentor tool logs yet.")
 
 
 def notes_page() -> None:
@@ -2302,6 +2404,7 @@ PAGES = {
     "Backend Deep Dive": backend_page,
     "Backend Course Tracker": backend_course_page,
     "Projects Tracker": projects_page,
+    "Project Mentor Agent": project_mentor_agent_page,
     "Notes / Learnings": notes_page,
     "Weekly Review": weekly_review_page,
     "Weekly Review Agent": weekly_review_agent_page,
@@ -2326,6 +2429,7 @@ STUDY_PAGES = [
     "Backend Deep Dive",
     "Backend Course Tracker",
     "Projects Tracker",
+    "Project Mentor Agent",
     "Notes / Learnings",
     "Weekly Review",
     "Weekly Review Agent",

@@ -250,6 +250,30 @@ def initialize_health_tables() -> None:
                 recommendations TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS project_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                plan_type TEXT,
+                roadmap TEXT,
+                next_tasks TEXT,
+                architecture_notes TEXT,
+                risks TEXT,
+                resume_angle TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS interview_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                interview_type TEXT,
+                topic TEXT,
+                questions TEXT,
+                user_answers TEXT,
+                feedback TEXT,
+                score REAL DEFAULT 0,
+                created_at TEXT
+            );
             """
         )
         ensure_fitness_profile_columns(conn)
@@ -1411,6 +1435,396 @@ def save_weekly_review(review: dict[str, Any]) -> dict[str, Any]:
     return {"saved": True, "weekly_review_id": cursor.lastrowid}
 
 
+def get_all_projects() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM projects ORDER BY progress_percentage ASC, id DESC").fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_project_details(project_id: int) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return row_to_dict(row)
+
+
+def get_project_notes(project_id: int) -> list[dict[str, Any]]:
+    project = get_project_details(project_id)
+    if not project:
+        return []
+    name = str(project.get("project_name", ""))
+    category = str(project.get("category", ""))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM notes
+            WHERE category = 'Project'
+               OR linked_track LIKE '%Project%'
+               OR title LIKE ?
+               OR content LIKE ?
+               OR tags LIKE ?
+               OR title LIKE ?
+               OR content LIKE ?
+            ORDER BY date DESC, id DESC
+            LIMIT 20
+            """,
+            (f"%{name}%", f"%{name}%", f"%{name}%", f"%{category}%", f"%{category}%"),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_recent_project_progress(limit: int = 5) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, project_name, category, status, progress_percentage,
+                   current_task, next_task, blockers, notes
+            FROM projects
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_related_learning_topics(project_id: int) -> dict[str, Any]:
+    project = get_project_details(project_id)
+    if not project:
+        return {"project": {}, "backend_topics": [], "system_design_sections": [], "ai_modules": []}
+    search_text = " ".join(
+        str(project.get(key, ""))
+        for key in ["project_name", "category", "current_task", "next_task", "notes"]
+    ).lower()
+    with connect() as conn:
+        backend = pd.read_sql_query("SELECT topic, phase, status, confidence, implementation_idea FROM backend_course", conn)
+        system_design = pd.read_sql_query("SELECT section_name, phase, status, confidence FROM system_design_course", conn)
+        ai = pd.read_sql_query("SELECT module_name, status, confidence, key_learning FROM ai_cohort", conn)
+
+    backend_matches = backend.head(0)
+    if not backend.empty:
+        backend_matches = backend[
+            backend.apply(lambda row: str(row["topic"]).lower() in search_text or str(row["phase"]).lower() in search_text, axis=1)
+        ]
+        if backend_matches.empty:
+            backend_matches = backend[backend["status"].fillna("").isin(["Not Started", "In Progress", "Revising"])].head(6)
+
+    system_matches = system_design.head(0)
+    if not system_design.empty:
+        system_matches = system_design[
+            system_design.apply(lambda row: str(row["section_name"]).lower() in search_text or str(row["phase"]).lower() in search_text, axis=1)
+        ]
+        if system_matches.empty:
+            system_matches = system_design[system_design["status"].fillna("").isin(["Not Started", "In Progress"])].head(6)
+
+    ai_matches = ai.head(0)
+    if not ai.empty:
+        ai_matches = ai[
+            ai.apply(lambda row: str(row["module_name"]).lower() in search_text or str(row["key_learning"]).lower() in search_text, axis=1)
+        ]
+        if ai_matches.empty:
+            ai_matches = ai[ai["status"].fillna("").isin(["Not Started", "In Progress"])].head(5)
+
+    return {
+        "project": project,
+        "backend_topics": backend_matches.head(8).to_dict("records"),
+        "system_design_sections": system_matches.head(8).to_dict("records"),
+        "ai_modules": ai_matches.head(6).to_dict("records"),
+    }
+
+
+def generate_project_roadmap(project_id: int) -> dict[str, Any]:
+    project = get_project_details(project_id)
+    if not project:
+        return {"roadmap": "Project not found.", "milestones": []}
+    current_task = project.get("current_task") or "clarify requirements"
+    next_task = project.get("next_task") or "build the smallest working feature"
+    milestones = [
+        "Define scope, user flow, success criteria, and data model.",
+        f"Finish current milestone: {current_task}.",
+        f"Implement next milestone: {next_task}.",
+        "Add production touches: validation, errors, logging, tests, and README screenshots.",
+        "Prepare portfolio polish: demo script, resume bullets, and deployment link.",
+    ]
+    return {"project_id": project_id, "project_name": project.get("project_name"), "roadmap": "\n".join(milestones), "milestones": milestones}
+
+
+def generate_next_tasks(project_id: int) -> dict[str, Any]:
+    project = get_project_details(project_id)
+    if not project:
+        return {"tasks": []}
+    tasks = [
+        project.get("current_task") or "Write one-page project spec and define MVP.",
+        project.get("next_task") or "Implement one end-to-end user flow.",
+        "Add tests or validation around the riskiest backend path.",
+        "Update README with architecture, setup, screenshots, and tradeoffs.",
+        "Create 2 resume bullets with metrics, stack, and ownership.",
+    ]
+    return {"project_id": project_id, "tasks": [task for task in tasks if task]}
+
+
+def generate_project_readme(project_id: int) -> dict[str, Any]:
+    project = get_project_details(project_id)
+    if not project:
+        return {"readme_outline": ""}
+    outline = f"""
+# {project.get('project_name')}
+
+## Problem
+Explain the user problem and why this project matters.
+
+## Features
+- Core workflow
+- Backend/API behavior
+- Data model
+- AI/system design component if applicable
+
+## Architecture
+Describe services, database tables, queues/cache, auth, deployment, and tradeoffs.
+
+## Setup
+Add install, env vars, and run commands.
+
+## Demo
+Add screenshots, demo link, and sample inputs.
+
+## Resume Angle
+Show ownership, scale, technical depth, and measurable impact.
+""".strip()
+    return {"project_id": project_id, "readme_outline": outline}
+
+
+def save_project_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                plan_type TEXT,
+                roadmap TEXT,
+                next_tasks TEXT,
+                architecture_notes TEXT,
+                risks TEXT,
+                resume_angle TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO project_plans (
+                project_id, plan_type, roadmap, next_tasks, architecture_notes,
+                risks, resume_angle, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan.get("project_id"),
+                plan.get("plan_type", "mentor"),
+                plan.get("roadmap", ""),
+                plan.get("next_tasks", ""),
+                plan.get("architecture_notes", ""),
+                plan.get("risks", ""),
+                plan.get("resume_angle", ""),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "project_plan_id": cursor.lastrowid}
+
+
+def get_project_portfolio_summary() -> dict[str, Any]:
+    with connect() as conn:
+        projects = pd.read_sql_query("SELECT * FROM projects", conn)
+        notes = pd.read_sql_query("SELECT * FROM notes", conn)
+    if projects.empty:
+        return {"projects": 0, "completed_projects": 0, "portfolio_readiness": 0, "highlight_projects": []}
+    completed = projects[projects["status"].fillna("").str.contains("completed|done", case=False, na=False)]
+    if completed.empty:
+        completed = projects[projects["progress_percentage"].fillna(0) >= 80]
+    highlight_projects = []
+    for _, row in projects.sort_values("progress_percentage", ascending=False).head(5).iterrows():
+        project_notes = []
+        if not notes.empty:
+            project_notes = notes[
+                notes["content"].fillna("").str.contains(str(row["project_name"]), case=False, na=False)
+                | notes["title"].fillna("").str.contains(str(row["project_name"]), case=False, na=False)
+            ]["title"].head(3).tolist()
+        highlight_projects.append(
+            {
+                "id": int(row["id"]),
+                "project_name": row["project_name"],
+                "category": row.get("category", ""),
+                "status": row.get("status", ""),
+                "progress_percentage": int(row.get("progress_percentage", 0) or 0),
+                "current_task": row.get("current_task", ""),
+                "notes": project_notes,
+            }
+        )
+    readiness = min(int(projects["progress_percentage"].fillna(0).mean()), 100)
+    return {
+        "projects": int(len(projects)),
+        "completed_projects": int(len(completed)),
+        "avg_progress": round(float(projects["progress_percentage"].fillna(0).mean()), 1),
+        "portfolio_readiness": readiness,
+        "highlight_projects": highlight_projects,
+    }
+
+
+def get_dsa_interview_readiness() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM dsa_problems", conn)
+    if df.empty:
+        return {"readiness": 0, "solved": 0, "weak_topics": [], "next_focus": "Start DSA tracking"}
+    solved = int((df["status"] == "Solved").sum())
+    avg_conf = float(df["confidence"].fillna(0).mean())
+    medium_hard = int(df[df["difficulty"].fillna("").isin(["Medium", "Hard"])].shape[0])
+    weak = df[(df["confidence"].fillna(0) <= 2) | (df["solved_without_help"].fillna(0) == 0)]
+    readiness = min(int((solved / 120) * 55 + (avg_conf / 5) * 25 + (medium_hard / 60) * 20), 100)
+    return {
+        "readiness": readiness,
+        "solved": solved,
+        "medium_hard_count": medium_hard,
+        "avg_confidence": round(avg_conf, 1),
+        "weak_topics": weak["topic"].fillna("Unknown").value_counts().head(6).index.tolist(),
+        "next_focus": ", ".join(weak["topic"].fillna("Unknown").value_counts().head(3).index.tolist()),
+    }
+
+
+def get_system_design_readiness() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM system_design_course", conn)
+    if df.empty:
+        return {"readiness": 0, "completed": 0, "weak_sections": [], "next_focus": "Start system design course"}
+    total = len(df)
+    completed = int((df["status"] == "Completed").sum())
+    interview_ready = int(df["interview_ready"].fillna(0).sum())
+    avg_conf = float(df["confidence"].fillna(0).mean())
+    readiness = min(int((completed / total) * 45 + (interview_ready / total) * 35 + (avg_conf / 5) * 20), 100)
+    weak = df[(df["confidence"].fillna(0) <= 2) & (df["status"].fillna("") != "Completed")]
+    return {
+        "readiness": readiness,
+        "completed": completed,
+        "total": int(total),
+        "interview_ready": interview_ready,
+        "avg_confidence": round(avg_conf, 1),
+        "weak_sections": weak.sort_values("section_number")["section_name"].head(6).tolist(),
+        "next_focus": ", ".join(weak.sort_values("section_number")["section_name"].head(3).tolist()),
+    }
+
+
+def get_backend_readiness() -> dict[str, Any]:
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM backend_course", conn)
+    if df.empty:
+        return {"readiness": 0, "completed": 0, "weak_topics": [], "next_focus": "Start backend course"}
+    total = len(df)
+    completed = int((df["status"] == "Completed").sum())
+    interview_ready = int(df["interview_ready"].fillna(0).sum())
+    implementations = int(df["mini_implementation_done"].fillna(0).sum())
+    avg_conf = float(df["confidence"].fillna(0).mean())
+    readiness = min(int((completed / total) * 30 + (interview_ready / total) * 30 + (implementations / total) * 20 + (avg_conf / 5) * 20), 100)
+    weak = df[(df["confidence"].fillna(0) <= 2) | ((df["video_done"].fillna(0) == 1) & (df["mini_implementation_done"].fillna(0) == 0))]
+    return {
+        "readiness": readiness,
+        "completed": completed,
+        "total": int(total),
+        "interview_ready": interview_ready,
+        "implementations": implementations,
+        "avg_confidence": round(avg_conf, 1),
+        "weak_topics": weak["topic"].head(8).tolist(),
+        "next_focus": ", ".join(weak["topic"].head(3).tolist()),
+    }
+
+
+def get_recent_weekly_reviews(limit: int = 4) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM weekly_ai_reviews ORDER BY week_start DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def generate_resume_bullets(project_id: int | None = None) -> dict[str, Any]:
+    with connect() as conn:
+        if project_id:
+            rows = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM projects ORDER BY progress_percentage DESC, id DESC LIMIT 5"
+            ).fetchall()
+    projects = rows_to_dicts(rows)
+    bullets: list[dict[str, Any]] = []
+    for project in projects:
+        name = project.get("project_name", "Project")
+        category = project.get("category") or "software"
+        task = project.get("current_task") or project.get("next_task") or "core features"
+        progress = project.get("progress_percentage", 0) or 0
+        bullets.append(
+            {
+                "project_id": project.get("id"),
+                "project_name": name,
+                "bullets": [
+                    f"Built {name}, a {category} project focused on {task}.",
+                    f"Owned implementation progress from planning through {progress}% completion with tracked blockers and next tasks.",
+                    f"Documented design decisions, tradeoffs, and learnings for interview storytelling.",
+                ],
+            }
+        )
+    return {"project_count": len(projects), "resume_bullets": bullets}
+
+
+def generate_interview_questions(topic: str) -> dict[str, Any]:
+    clean_topic = topic.strip() or "Backend and AI Engineer readiness"
+    base_questions = [
+        f"Explain {clean_topic} from first principles and mention one tradeoff.",
+        f"Design a small production-ready feature involving {clean_topic}. What APIs, data model, and failure cases matter?",
+        f"What is one bug or scaling issue you would expect in {clean_topic}, and how would you detect it?",
+        f"How would you test and monitor a system using {clean_topic}?",
+        f"Describe a project experience where {clean_topic} would improve the architecture.",
+    ]
+    return {"topic": clean_topic, "questions": base_questions}
+
+
+def save_interview_session(session: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interview_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                interview_type TEXT,
+                topic TEXT,
+                questions TEXT,
+                user_answers TEXT,
+                feedback TEXT,
+                score REAL DEFAULT 0,
+                created_at TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO interview_sessions (
+                date, interview_type, topic, questions, user_answers,
+                feedback, score, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session.get("date") or date.today().isoformat(),
+                session.get("interview_type", "Mock Interview"),
+                session.get("topic", ""),
+                session.get("questions", ""),
+                session.get("user_answers", ""),
+                session.get("feedback", ""),
+                session.get("score", 0),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "interview_session_id": cursor.lastrowid}
+
+
 def save_chat_message(bot_type: str, role: str, content: str) -> None:
     initialize_health_tables()
     with connect() as conn:
@@ -1521,6 +1935,23 @@ TOOL_FUNCTIONS = {
     "calculate_weekly_consistency_score": calculate_weekly_consistency_score,
     "calculate_burnout_risk": calculate_burnout_risk,
     "save_weekly_review": save_weekly_review,
+    "get_project_portfolio_summary": get_project_portfolio_summary,
+    "get_dsa_interview_readiness": get_dsa_interview_readiness,
+    "get_system_design_readiness": get_system_design_readiness,
+    "get_backend_readiness": get_backend_readiness,
+    "get_recent_weekly_reviews": get_recent_weekly_reviews,
+    "generate_resume_bullets": generate_resume_bullets,
+    "generate_interview_questions": generate_interview_questions,
+    "save_interview_session": save_interview_session,
+    "get_all_projects": get_all_projects,
+    "get_project_details": get_project_details,
+    "get_project_notes": get_project_notes,
+    "get_recent_project_progress": get_recent_project_progress,
+    "get_related_learning_topics": get_related_learning_topics,
+    "generate_project_roadmap": generate_project_roadmap,
+    "generate_next_tasks": generate_next_tasks,
+    "generate_project_readme": generate_project_readme,
+    "save_project_plan": save_project_plan,
 }
 
 
