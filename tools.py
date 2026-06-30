@@ -234,6 +234,22 @@ def initialize_health_tables() -> None:
                 priority TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS weekly_ai_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_start TEXT,
+                week_end TEXT,
+                study_score REAL DEFAULT 0,
+                health_score REAL DEFAULT 0,
+                consistency_score REAL DEFAULT 0,
+                burnout_risk TEXT,
+                wins TEXT,
+                misses TEXT,
+                weak_areas TEXT,
+                next_week_focus TEXT,
+                recommendations TEXT,
+                created_at TEXT
+            );
             """
         )
         ensure_fitness_profile_columns(conn)
@@ -1156,6 +1172,245 @@ def save_learning_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return {"saved": True, "learning_plan_id": cursor.lastrowid}
 
 
+def normalize_week_range(week_start: str | None = None, week_end: str | None = None) -> tuple[str, str]:
+    if week_start:
+        start = pd.to_datetime(week_start, errors="coerce")
+        start_date = start.date() if not pd.isna(start) else date.today() - timedelta(days=date.today().weekday())
+    else:
+        start_date = date.today() - timedelta(days=date.today().weekday())
+    if week_end:
+        end = pd.to_datetime(week_end, errors="coerce")
+        end_date = end.date() if not pd.isna(end) else start_date + timedelta(days=6)
+    else:
+        end_date = start_date + timedelta(days=6)
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def read_week_df(table: str, date_column: str, week_start: str, week_end: str) -> pd.DataFrame:
+    with connect() as conn:
+        return pd.read_sql_query(
+            f"SELECT * FROM {table} WHERE {date_column} BETWEEN ? AND ?",
+            conn,
+            params=(week_start, week_end),
+        )
+
+
+def get_week_study_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    daily = read_week_df("daily_logs", "date", week_start, week_end)
+    notes = read_week_df("notes", "date", week_start, week_end)
+    plans = read_week_df("learning_plans", "date", week_start, week_end)
+    study_minutes = int(daily["study_minutes"].fillna(0).sum()) if not daily.empty else 0
+    days_logged = int(daily["date"].nunique()) if not daily.empty else 0
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "study_minutes": study_minutes,
+        "study_hours": round(study_minutes / 60, 1),
+        "days_logged": days_logged,
+        "slot1_done": int(daily["slot1_done"].fillna(0).sum()) if not daily.empty else 0,
+        "slot2_done": int(daily["slot2_done"].fillna(0).sum()) if not daily.empty else 0,
+        "dsa_done_count": int(daily["dsa_done_count"].fillna(0).sum()) if not daily.empty else 0,
+        "notes_created": int(len(notes)),
+        "learning_plans_created": int(len(plans)),
+        "blockers": daily["blockers"].dropna().tail(5).tolist() if not daily.empty else [],
+        "reflections": daily["reflection"].dropna().tail(5).tolist() if not daily.empty else [],
+    }
+
+
+def get_week_dsa_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    df = read_week_df("dsa_problems", "date", week_start, week_end)
+    if df.empty:
+        return {"week_start": week_start, "week_end": week_end, "problems": 0, "solved": 0, "weak_topics": []}
+    weak = df[(df["confidence"].fillna(0) <= 2) | (df["solved_without_help"].fillna(0) == 0)]
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "problems": int(len(df)),
+        "solved": int((df["status"] == "Solved").sum()),
+        "avg_confidence": round(float(df["confidence"].fillna(0).mean()), 1),
+        "topics": df["topic"].fillna("Unknown").value_counts().head(5).to_dict(),
+        "weak_topics": weak["topic"].fillna("Unknown").value_counts().head(5).index.tolist(),
+        "mistakes": df["mistakes"].dropna().tail(5).tolist(),
+    }
+
+
+def get_week_ai_cohort_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    with connect() as conn:
+        df = pd.read_sql_query("SELECT * FROM ai_cohort", conn)
+    if df.empty:
+        return {"modules": 0, "completed": 0, "avg_completion": 0, "weak_modules": []}
+    weak = df[(df["confidence"].fillna(0) <= 2) | (df["blockers"].fillna("") != "")]
+    return {
+        "modules": int(len(df)),
+        "completed": int((df["status"] == "Completed").sum()),
+        "avg_completion": round(float(df["completion_percentage"].fillna(0).mean()), 1),
+        "implementation_done": int(df["implementation_done"].fillna(0).sum()),
+        "weak_modules": weak["module_name"].head(5).tolist(),
+        "next_modules": df[df["status"].fillna("").isin(["Not Started", "In Progress"])]["module_name"].head(3).tolist(),
+    }
+
+
+def get_week_system_design_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    completed = read_week_df("system_design_course", "completed_at", week_start, week_end)
+    all_summary = get_system_design_summary()
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "sections_completed_this_week": int(len(completed)),
+        "study_hours_this_week": round(float(completed["study_hours"].fillna(0).sum()), 1) if not completed.empty else 0,
+        **all_summary,
+    }
+
+
+def get_week_backend_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    week_df = read_week_df("backend_course", "date_started", week_start, week_end)
+    all_summary = get_backend_course_summary()
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "topics_started_this_week": int(len(week_df)),
+        "topics_completed_this_week": int((week_df["status"] == "Completed").sum()) if not week_df.empty else 0,
+        "implementations_this_week": int(week_df["mini_implementation_done"].fillna(0).sum()) if not week_df.empty else 0,
+        **all_summary,
+    }
+
+
+def get_week_project_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    summary = get_project_progress_summary()
+    notes = read_week_df("notes", "date", week_start, week_end)
+    project_notes = notes[notes["linked_track"].fillna("").str.contains("project", case=False, na=False)] if not notes.empty else pd.DataFrame()
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "project_notes_created": int(len(project_notes)),
+        **summary,
+    }
+
+
+def get_week_health_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(week_start, week_end)
+    gym = read_week_df("gym_sessions", "session_date", week_start, week_end)
+    diet = read_week_df("diet_logs", "log_date", week_start, week_end)
+    weight = read_week_df("weight_logs", "log_date", week_start, week_end)
+    workouts = int(len(gym))
+    avg_protein = round(float(diet["protein_g"].fillna(0).mean()), 1) if not diet.empty else 0
+    avg_calories = round(float(diet["calories"].fillna(0).mean()), 1) if not diet.empty else 0
+    avg_steps = round(float(weight["steps"].fillna(0).mean()), 1) if not weight.empty else 0
+    health_score = calculate_health_score().get("health_score", 0)
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "workouts": workouts,
+        "gym_volume_kg": int(gym["total_volume_kg"].fillna(0).sum()) if not gym.empty else 0,
+        "cardio_minutes": int(gym["cardio_minutes"].fillna(0).sum()) if not gym.empty else 0,
+        "diet_logs": int(len(diet)),
+        "avg_protein_g": avg_protein,
+        "avg_calories": avg_calories,
+        "avg_steps": avg_steps,
+        "latest_weight_kg": float(weight.sort_values("log_date").iloc[-1]["weight_kg"]) if not weight.empty else 0,
+        "health_score": health_score,
+    }
+
+
+def get_previous_week_review() -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM weekly_ai_reviews ORDER BY week_start DESC, id DESC LIMIT 1").fetchone()
+    return row_to_dict(row)
+
+
+def calculate_weekly_consistency_score() -> dict[str, Any]:
+    week_start, week_end = normalize_week_range()
+    study = get_week_study_summary(week_start, week_end)
+    health = get_week_health_summary(week_start, week_end)
+    score = 0
+    score += min(study["days_logged"], 7) * 8
+    score += min(study["slot1_done"], 5) * 5
+    score += min(study["slot2_done"], 5) * 3
+    score += min(health["workouts"], 5) * 4
+    score = min(score, 100)
+    return {"week_start": week_start, "week_end": week_end, "consistency_score": score, "study": study, "health": health}
+
+
+def calculate_burnout_risk() -> dict[str, Any]:
+    week_start, week_end = normalize_week_range()
+    study = get_week_study_summary(week_start, week_end)
+    health = get_week_health_summary(week_start, week_end)
+    risk_points = 0
+    reasons: list[str] = []
+    if study["study_hours"] > 24:
+        risk_points += 2
+        reasons.append("high study load")
+    if health["workouts"] >= 6:
+        risk_points += 2
+        reasons.append("high workout frequency")
+    if health["avg_calories"] and health["avg_calories"] < 1800:
+        risk_points += 2
+        reasons.append("calories too low")
+    if health["avg_protein_g"] and health["avg_protein_g"] < 110:
+        risk_points += 1
+        reasons.append("protein low")
+    if study["blockers"]:
+        risk_points += 1
+        reasons.append("blockers logged")
+    risk = "High" if risk_points >= 5 else "Medium" if risk_points >= 3 else "Low"
+    return {"burnout_risk": risk, "risk_points": risk_points, "reasons": reasons}
+
+
+def save_weekly_review(review: dict[str, Any]) -> dict[str, Any]:
+    week_start, week_end = normalize_week_range(review.get("week_start"), review.get("week_end"))
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS weekly_ai_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_start TEXT,
+                week_end TEXT,
+                study_score REAL DEFAULT 0,
+                health_score REAL DEFAULT 0,
+                consistency_score REAL DEFAULT 0,
+                burnout_risk TEXT,
+                wins TEXT,
+                misses TEXT,
+                weak_areas TEXT,
+                next_week_focus TEXT,
+                recommendations TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO weekly_ai_reviews (
+                week_start, week_end, study_score, health_score, consistency_score,
+                burnout_risk, wins, misses, weak_areas, next_week_focus,
+                recommendations, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                week_start,
+                week_end,
+                review.get("study_score", 0),
+                review.get("health_score", 0),
+                review.get("consistency_score", 0),
+                review.get("burnout_risk", ""),
+                review.get("wins", ""),
+                review.get("misses", ""),
+                review.get("weak_areas", ""),
+                review.get("next_week_focus", ""),
+                review.get("recommendations", ""),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "weekly_review_id": cursor.lastrowid}
+
+
 def save_chat_message(bot_type: str, role: str, content: str) -> None:
     initialize_health_tables()
     with connect() as conn:
@@ -1255,6 +1510,17 @@ TOOL_FUNCTIONS = {
     "get_project_progress_summary": get_project_progress_summary,
     "get_revision_due_items": get_revision_due_items,
     "save_learning_plan": save_learning_plan,
+    "get_week_study_summary": get_week_study_summary,
+    "get_week_dsa_summary": get_week_dsa_summary,
+    "get_week_ai_cohort_summary": get_week_ai_cohort_summary,
+    "get_week_system_design_summary": get_week_system_design_summary,
+    "get_week_backend_summary": get_week_backend_summary,
+    "get_week_project_summary": get_week_project_summary,
+    "get_week_health_summary": get_week_health_summary,
+    "get_previous_week_review": get_previous_week_review,
+    "calculate_weekly_consistency_score": calculate_weekly_consistency_score,
+    "calculate_burnout_risk": calculate_burnout_risk,
+    "save_weekly_review": save_weekly_review,
 }
 
 

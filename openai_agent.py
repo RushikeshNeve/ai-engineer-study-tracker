@@ -410,8 +410,141 @@ LEARNING_COACH_TOOLS = [
     },
 ]
 
+WEEKLY_REVIEW_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_study_summary",
+            "description": "Summarize daily logs, notes, learning plans, slot completion, blockers, and reflections for a week.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_dsa_summary",
+            "description": "Summarize DSA problems, topics, confidence, mistakes, and weak topics for a week.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_ai_cohort_summary",
+            "description": "Summarize AI cohort progress and weak modules.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_system_design_summary",
+            "description": "Summarize weekly and overall system design course progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_backend_summary",
+            "description": "Summarize weekly and overall backend course progress.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_project_summary",
+            "description": "Summarize project progress and blockers.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_health_summary",
+            "description": "Summarize gym, diet, weight, steps, and health metrics for a week.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_previous_week_review",
+            "description": "Read the latest saved weekly AI review.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_weekly_consistency_score",
+            "description": "Calculate weekly consistency score from study and health logs.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_burnout_risk",
+            "description": "Calculate burnout risk from study load, workout load, calories, protein, and blockers.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_weekly_review",
+            "description": "Save the generated weekly AI review to SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"review": {"type": "object"}},
+                "required": ["review"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
 
-def run_health_agent(bot_type: Literal["gym", "diet", "health_manager", "learning_coach"], user_input: str) -> str:
+def run_health_agent(
+    bot_type: Literal["gym", "diet", "health_manager", "learning_coach", "weekly_review"],
+    user_input: str,
+) -> str:
     if not os.getenv("OPENAI_API_KEY"):
         return "OpenAI API key not found. Please add OPENAI_API_KEY to your environment."
 
@@ -425,9 +558,12 @@ def run_health_agent(bot_type: Literal["gym", "diet", "health_manager", "learnin
     elif bot_type == "health_manager":
         tools = HEALTH_MANAGER_TOOLS
         system_prompt = health_manager_prompt()
-    else:
+    elif bot_type == "learning_coach":
         tools = LEARNING_COACH_TOOLS
         system_prompt = learning_coach_prompt()
+    else:
+        tools = WEEKLY_REVIEW_TOOLS
+        system_prompt = weekly_review_prompt()
 
     save_chat_message(bot_type, "user", user_input)
     messages = [{"role": "system", "content": system_prompt}]
@@ -622,4 +758,60 @@ Final answer structure:
 - Why this plan.
 
 Do not claim a plan was saved unless save_learning_plan returned saved=true.
+"""
+
+
+def weekly_review_prompt() -> str:
+    return """
+You are Rushikesh's Weekly Review Agent for his Backend + AI Engineer transition and health routine.
+You must use tools before giving a weekly review. Do not generate the review from memory only.
+
+For every weekly review request:
+1. Identify week_start and week_end from the user request. If not provided, use the current week Monday-Sunday.
+2. Call get_week_study_summary(week_start, week_end).
+3. Call get_week_dsa_summary(week_start, week_end).
+4. Call get_week_ai_cohort_summary(week_start, week_end).
+5. Call get_week_system_design_summary(week_start, week_end).
+6. Call get_week_backend_summary(week_start, week_end).
+7. Call get_week_project_summary(week_start, week_end).
+8. Call get_week_health_summary(week_start, week_end).
+9. Call get_previous_week_review().
+10. Call calculate_weekly_consistency_score().
+11. Call calculate_burnout_risk().
+12. Call save_weekly_review(review).
+
+The saved review object must include:
+- week_start
+- week_end
+- study_score
+- health_score
+- consistency_score
+- burnout_risk
+- wins
+- misses
+- weak_areas
+- next_week_focus
+- recommendations
+
+Review requirements:
+- Generate a full weekly review.
+- Compare current week with previous week or previous saved review when available.
+- Identify wins and missed targets.
+- Detect burnout risk.
+- Recommend next week's focus.
+- Balance study, gym, diet, sleep, and office workload.
+- Use specific numbers from tool results.
+- If logs are sparse, say what was missing and avoid pretending precision.
+
+Final answer structure:
+- Saved review: review id if available.
+- Scores: study, health, consistency, burnout risk.
+- Biggest wins.
+- Biggest misses.
+- Weak areas.
+- Health and recovery notes.
+- Next week focus.
+- Practical recommendations.
+
+Do not claim a weekly review was saved unless save_weekly_review returned saved=true.
 """

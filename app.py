@@ -17,6 +17,8 @@ from tools import (
     calculate_weekly_avg_protein,
     calculate_weekly_workout_count,
     calculate_weight_trend,
+    calculate_burnout_risk,
+    calculate_weekly_consistency_score,
     get_backend_course_summary,
     get_dsa_progress_summary,
     get_fitness_profile,
@@ -82,6 +84,7 @@ TABLES = [
     "notes",
     "weekly_reviews",
     "learning_plans",
+    "weekly_ai_reviews",
 ]
 
 COURSE_LINK = "https://youtu.be/0Rwb4Xmlcwc?si=TDG5hZDWn0HAriFR"
@@ -392,6 +395,22 @@ def init_db() -> None:
                 priority TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS weekly_ai_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_start TEXT,
+                week_end TEXT,
+                study_score REAL DEFAULT 0,
+                health_score REAL DEFAULT 0,
+                consistency_score REAL DEFAULT 0,
+                burnout_risk TEXT,
+                wins TEXT,
+                misses TEXT,
+                weak_areas TEXT,
+                next_week_focus TEXT,
+                recommendations TEXT,
+                created_at TEXT
+            );
             """
         )
         ensure_weekly_backend_columns(conn)
@@ -673,6 +692,7 @@ def dashboard() -> None:
     backend_course = read_table("backend_course")
     system_design_course = read_table("system_design_course")
     learning_plans = read_table("learning_plans")
+    weekly_ai_reviews = read_table("weekly_ai_reviews")
 
     if not daily.empty:
         daily["date_dt"] = pd.to_datetime(daily["date"], errors="coerce")
@@ -705,6 +725,11 @@ def dashboard() -> None:
     backend_summary = get_backend_course_summary()
     revision_due_items = get_revision_due_items()
     project_summary = get_project_progress_summary()
+    consistency_summary = calculate_weekly_consistency_score()
+    burnout_summary = calculate_burnout_risk()
+    latest_weekly_review = pd.Series(dtype=object)
+    if not weekly_ai_reviews.empty:
+        latest_weekly_review = weekly_ai_reviews.sort_values(["week_start", "id"]).iloc[-1]
 
     st.subheader("This Week")
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -735,6 +760,21 @@ def dashboard() -> None:
     else:
         st.write(f"**Today's AI Plan:** {latest_learning_plan.get('focus_area', '')}")
         st.caption(str(latest_learning_plan.get("recommended_tasks", "")))
+
+    st.subheader("Weekly Review Agent")
+    w1, w2, w3, w4, w5 = st.columns(5)
+    with w1:
+        metric_card("Latest Weekly Score", latest_weekly_review.get("study_score", 0) if not latest_weekly_review.empty else 0)
+    with w2:
+        metric_card("Consistency Score", latest_weekly_review.get("consistency_score", consistency_summary.get("consistency_score", 0)) if not latest_weekly_review.empty else consistency_summary.get("consistency_score", 0))
+    with w3:
+        metric_card("Burnout Risk", latest_weekly_review.get("burnout_risk", burnout_summary.get("burnout_risk", "Low")) if not latest_weekly_review.empty else burnout_summary.get("burnout_risk", "Low"))
+    with w4:
+        metric_card("Biggest Win", latest_weekly_review.get("wins", "No AI review yet") if not latest_weekly_review.empty else "No AI review yet")
+    with w5:
+        metric_card("Biggest Miss", latest_weekly_review.get("misses", "No AI review yet") if not latest_weekly_review.empty else "No AI review yet")
+    if not latest_weekly_review.empty:
+        st.caption(f"Next week focus: {latest_weekly_review.get('next_week_focus', '')}")
 
     st.subheader("Backend Course")
     b1, b2, b3, b4, b5 = st.columns(5)
@@ -1614,6 +1654,64 @@ def learning_coach_agent_page() -> None:
         show_dataframe(logs, "No learning coach tool logs yet.")
 
 
+def weekly_review_agent_page() -> None:
+    st.title("Weekly Review Agent")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    default_start, default_end = current_week_range(date.today())
+    c1, c2 = st.columns(2)
+    with c1:
+        week_start = st.date_input("Week start", value=default_start, key="weekly_ai_start")
+    with c2:
+        week_end = st.date_input("Week end", value=default_end, key="weekly_ai_end")
+
+    reviews_df = read_table("weekly_ai_reviews")
+    consistency_summary = calculate_weekly_consistency_score()
+    burnout_summary = calculate_burnout_risk()
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        metric_card("Consistency Score", consistency_summary.get("consistency_score", 0))
+    with m2:
+        metric_card("Burnout Risk", burnout_summary.get("burnout_risk", "Low"))
+    with m3:
+        metric_card("Risk Reasons", ", ".join(burnout_summary.get("reasons", [])) or "None")
+
+    if st.button("Generate Weekly Review", use_container_width=True):
+        prompt = f"Generate weekly review for {week_start.isoformat()} to {week_end.isoformat()}."
+        with st.spinner("Calling weekly review tools and generating review..."):
+            response = run_health_agent("weekly_review", prompt)
+        st.session_state.weekly_review_last_response = response
+
+    prompt = st.chat_input("Ask for a weekly review, burnout check, or next-week focus")
+    if prompt:
+        full_prompt = f"{prompt}\nWeek range: {week_start.isoformat()} to {week_end.isoformat()}."
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling weekly review tools..."):
+                response = run_health_agent("weekly_review", full_prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("weekly_review_last_response", "")
+    if last_response:
+        st.subheader("Latest Generated Review")
+        st.write(last_response)
+
+    st.subheader("Recent Weekly Review Messages")
+    for message in get_recent_chat_messages("weekly_review", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Saved Weekly AI Reviews")
+    show_dataframe(reviews_df, "No weekly AI reviews saved yet.")
+
+    with st.expander("Recent weekly review tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("weekly_review", 50))
+        show_dataframe(logs, "No weekly review tool logs yet.")
+
+
 def health_dashboard_page() -> None:
     st.title("Health Dashboard")
     profile = get_fitness_profile()
@@ -2206,6 +2304,7 @@ PAGES = {
     "Projects Tracker": projects_page,
     "Notes / Learnings": notes_page,
     "Weekly Review": weekly_review_page,
+    "Weekly Review Agent": weekly_review_agent_page,
     "Learning Coach Agent": learning_coach_agent_page,
     "Export Data": export_page,
     "Health Dashboard": health_dashboard_page,
@@ -2229,6 +2328,7 @@ STUDY_PAGES = [
     "Projects Tracker",
     "Notes / Learnings",
     "Weekly Review",
+    "Weekly Review Agent",
     "Learning Coach Agent",
     "Export Data",
 ]
