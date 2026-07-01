@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from services.github_service import github_weekly_summary, link_github_to_projects, list_recent_activity, list_saved_repositories
+from services.observability_service import log_tool_execution
 
 
 DB_PATH = Path("study_tracker.db")
@@ -260,6 +264,17 @@ def initialize_health_tables() -> None:
                 architecture_notes TEXT,
                 risks TEXT,
                 resume_angle TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS knowledge_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_type TEXT,
+                source_type TEXT,
+                source_id INTEGER,
+                title TEXT,
+                content TEXT,
+                tags TEXT,
                 created_at TEXT
             );
 
@@ -1317,6 +1332,32 @@ def get_week_project_summary(week_start: str | None = None, week_end: str | None
     }
 
 
+def get_week_github_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
+    return github_weekly_summary(week_start, week_end)
+
+
+def get_recent_github_activity(limit: int = 20) -> list[dict[str, Any]]:
+    return list_recent_activity(limit)
+
+
+def get_github_project_links() -> list[dict[str, Any]]:
+    return link_github_to_projects()
+
+
+def get_github_repositories_summary() -> dict[str, Any]:
+    repositories = list_saved_repositories()
+    languages: dict[str, int] = {}
+    for repo in repositories:
+        language = repo.get("language") or "Unknown"
+        languages[language] = languages.get(language, 0) + 1
+    return {
+        "repository_count": len(repositories),
+        "languages": languages,
+        "last_pushed_repo": repositories[0]["repo_name"] if repositories else "",
+        "repositories": repositories[:20],
+    }
+
+
 def get_week_health_summary(week_start: str | None = None, week_end: str | None = None) -> dict[str, Any]:
     week_start, week_end = normalize_week_range(week_start, week_end)
     gym = read_week_df("gym_sessions", "session_date", week_start, week_end)
@@ -1632,6 +1673,183 @@ def save_project_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return {"saved": True, "project_plan_id": cursor.lastrowid}
 
 
+def search_notes(query: str) -> list[dict[str, Any]]:
+    pattern = f"%{query}%"
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM notes
+            WHERE title LIKE ? OR content LIKE ? OR tags LIKE ? OR category LIKE ? OR linked_track LIKE ?
+            ORDER BY date DESC, id DESC
+            LIMIT 30
+            """,
+            (pattern, pattern, pattern, pattern, pattern),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_notes_by_category(category: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM notes WHERE category = ? ORDER BY date DESC, id DESC LIMIT 50",
+            (category,),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_recent_notes(limit: int = 10) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM notes ORDER BY date DESC, id DESC LIMIT ?", (limit,)).fetchall()
+    return rows_to_dicts(rows)
+
+
+def get_linked_notes(track: str) -> list[dict[str, Any]]:
+    pattern = f"%{track}%"
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM notes
+            WHERE linked_track LIKE ? OR category LIKE ? OR tags LIKE ?
+            ORDER BY date DESC, id DESC
+            LIMIT 50
+            """,
+            (pattern, pattern, pattern),
+        ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def save_note(note: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO notes (date, category, title, content, tags, linked_track)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note.get("date") or date.today().isoformat(),
+                note.get("category", "Other"),
+                note.get("title", "Untitled note"),
+                note.get("content", ""),
+                note.get("tags", ""),
+                note.get("linked_track", "Other"),
+            ),
+        )
+    return {"saved": True, "note_id": cursor.lastrowid}
+
+
+def summarize_note(note_id: int) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+    note = row_to_dict(row)
+    if not note:
+        return {"note_id": note_id, "summary": "Note not found."}
+    content = str(note.get("content", ""))
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", content) if part.strip()]
+    summary = " ".join(sentences[:3]) if sentences else content[:500]
+    return {
+        "note_id": note_id,
+        "title": note.get("title", ""),
+        "category": note.get("category", ""),
+        "summary": summary or "No content captured.",
+        "tags": note.get("tags", ""),
+    }
+
+
+def generate_flashcards(note_id: int) -> dict[str, Any]:
+    summary = summarize_note(note_id)
+    if summary.get("summary") == "Note not found.":
+        return {"note_id": note_id, "flashcards": []}
+    title = summary.get("title") or "this note"
+    category = summary.get("category") or "Knowledge"
+    text = summary.get("summary") or ""
+    flashcards = [
+        {"front": f"What is the core idea of {title}?", "back": text},
+        {"front": f"Which track does {title} belong to?", "back": category},
+        {"front": f"What should you revise from {title} before an interview?", "back": text[:300]},
+    ]
+    return {"note_id": note_id, "flashcards": flashcards}
+
+
+def generate_revision_questions(topic: str) -> dict[str, Any]:
+    clean_topic = topic.strip() or "the selected topic"
+    related_notes = search_notes(clean_topic)
+    pattern = f"%{clean_topic}%"
+    with connect() as conn:
+        dsa_rows = conn.execute(
+            "SELECT problem_name, topic, pattern, difficulty, confidence FROM dsa_problems WHERE topic LIKE ? OR pattern LIKE ? OR notes LIKE ? LIMIT 8",
+            (pattern, pattern, pattern),
+        ).fetchall()
+        backend_rows = conn.execute(
+            "SELECT topic, phase, status, confidence, implementation_idea FROM backend_course WHERE topic LIKE ? OR phase LIKE ? OR notes LIKE ? LIMIT 8",
+            (pattern, pattern, pattern),
+        ).fetchall()
+        system_rows = conn.execute(
+            "SELECT section_name, phase, status, confidence FROM system_design_course WHERE section_name LIKE ? OR phase LIKE ? OR notes LIKE ? LIMIT 8",
+            (pattern, pattern, pattern),
+        ).fetchall()
+        ai_rows = conn.execute(
+            "SELECT module_name, status, confidence, key_learning FROM ai_cohort WHERE module_name LIKE ? OR key_learning LIKE ? LIMIT 8",
+            (pattern, pattern),
+        ).fetchall()
+        project_rows = conn.execute(
+            "SELECT project_name, category, status, current_task, next_task FROM projects WHERE project_name LIKE ? OR category LIKE ? OR notes LIKE ? LIMIT 8",
+            (pattern, pattern, pattern),
+        ).fetchall()
+    questions = [
+        f"Explain {clean_topic} from first principles.",
+        f"What are the most common mistakes or edge cases in {clean_topic}?",
+        f"How would you implement or apply {clean_topic} in a backend/AI project?",
+        f"What tradeoffs should you mention for {clean_topic} in an interview?",
+        f"Connect {clean_topic} to one project, one system design concept, and one DSA pattern.",
+    ]
+    return {
+        "topic": clean_topic,
+        "questions": questions,
+        "related_notes": related_notes[:5],
+        "related_dsa": rows_to_dicts(dsa_rows),
+        "related_backend": rows_to_dicts(backend_rows),
+        "related_system_design": rows_to_dicts(system_rows),
+        "related_ai_cohort": rows_to_dicts(ai_rows),
+        "related_projects": rows_to_dicts(project_rows),
+    }
+
+
+def save_knowledge_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_type TEXT,
+                source_type TEXT,
+                source_id INTEGER,
+                title TEXT,
+                content TEXT,
+                tags TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO knowledge_artifacts (
+                artifact_type, source_type, source_id, title, content, tags, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact.get("artifact_type", "summary"),
+                artifact.get("source_type", "note"),
+                artifact.get("source_id", 0),
+                artifact.get("title", "Knowledge artifact"),
+                artifact.get("content", ""),
+                artifact.get("tags", ""),
+                datetime.now().isoformat(),
+            ),
+        )
+    return {"saved": True, "knowledge_artifact_id": cursor.lastrowid}
+
+
 def get_project_portfolio_summary() -> dict[str, Any]:
     with connect() as conn:
         projects = pd.read_sql_query("SELECT * FROM projects", conn)
@@ -1930,6 +2148,10 @@ TOOL_FUNCTIONS = {
     "get_week_system_design_summary": get_week_system_design_summary,
     "get_week_backend_summary": get_week_backend_summary,
     "get_week_project_summary": get_week_project_summary,
+    "get_week_github_summary": get_week_github_summary,
+    "get_recent_github_activity": get_recent_github_activity,
+    "get_github_project_links": get_github_project_links,
+    "get_github_repositories_summary": get_github_repositories_summary,
     "get_week_health_summary": get_week_health_summary,
     "get_previous_week_review": get_previous_week_review,
     "calculate_weekly_consistency_score": calculate_weekly_consistency_score,
@@ -1952,21 +2174,34 @@ TOOL_FUNCTIONS = {
     "generate_next_tasks": generate_next_tasks,
     "generate_project_readme": generate_project_readme,
     "save_project_plan": save_project_plan,
+    "search_notes": search_notes,
+    "get_notes_by_category": get_notes_by_category,
+    "get_recent_notes": get_recent_notes,
+    "get_linked_notes": get_linked_notes,
+    "save_note": save_note,
+    "summarize_note": summarize_note,
+    "generate_flashcards": generate_flashcards,
+    "generate_revision_questions": generate_revision_questions,
+    "save_knowledge_artifact": save_knowledge_artifact,
 }
 
 
 def call_tool(name: str, arguments: str, bot_type: str = "") -> str:
+    started = time.perf_counter()
     if name not in TOOL_FUNCTIONS:
         error = f"Unknown tool: {name}"
         save_tool_log(bot_type, name, arguments or "{}", "", error)
+        log_tool_execution(name, bot_type, int((time.perf_counter() - started) * 1000), False, error)
         return json.dumps({"error": error})
     try:
         kwargs = json.loads(arguments or "{}")
         result = TOOL_FUNCTIONS[name](**kwargs)
         result_json = json.dumps(result, default=str)
         save_tool_log(bot_type, name, arguments or "{}", result_json)
+        log_tool_execution(name, bot_type, int((time.perf_counter() - started) * 1000), True)
         return result_json
     except Exception as exc:
         error = str(exc)
         save_tool_log(bot_type, name, arguments or "{}", "", error)
+        log_tool_execution(name, bot_type, int((time.perf_counter() - started) * 1000), False, error)
         return json.dumps({"error": error})

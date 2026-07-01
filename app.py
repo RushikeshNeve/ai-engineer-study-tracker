@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -9,8 +11,61 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from openai import OpenAI
 
 from openai_agent import run_health_agent
+from services.voice_mode import (
+    generate_voice_response,
+    get_voice_settings,
+    handle_voice_input,
+    initialize_voice_tables,
+    save_audio_response,
+    save_voice_conversation as persist_voice_conversation,
+    update_voice_settings,
+)
+from services.mythos_personality import get_voice_personality_prompt
+from services.memory_service import (
+    autosave_memories,
+    delete_memory,
+    get_all_memories,
+    initialize_memory_tables,
+    save_memory,
+    search_memory,
+    update_memory,
+)
+from services.automation_engine import (
+    get_latest_daily_briefing,
+    initialize_automation_tables,
+    latest_notifications,
+    latest_reports,
+    list_automation_logs,
+    list_automations,
+    list_notifications,
+    mark_notification_read,
+    run_automation,
+    update_automation_enabled,
+)
+from services.github_service import (
+    get_repository_details as github_repository_details,
+    github_activity_trend,
+    github_is_configured,
+    github_weekly_summary,
+    initialize_github_tables,
+    link_github_to_projects,
+    list_recent_activity as list_github_recent_activity,
+    list_saved_repositories,
+    sync_github_activity,
+)
+from services.observability_service import (
+    daily_metric,
+    initialize_observability_tables,
+    log_llm_request,
+    log_router_execution,
+    observability_dashboard_summary,
+    read_observability_table,
+    top_counts,
+)
+from services.scheduler_service import tick as scheduler_tick
 from tools import (
     WEEKLY_SPLIT,
     calculate_health_score,
@@ -20,14 +75,18 @@ from tools import (
     calculate_burnout_risk,
     calculate_weekly_consistency_score,
     get_backend_course_summary,
+    get_backend_readiness,
+    get_dsa_interview_readiness,
     get_dsa_progress_summary,
     get_fitness_profile,
     get_project_progress_summary,
+    get_project_portfolio_summary,
     get_recent_chat_messages,
     get_recent_diet_logs,
     get_recent_gym_sessions,
     get_recent_tool_logs,
     get_revision_due_items,
+    get_system_design_readiness,
     get_weight_logs,
     initialize_health_tables,
     save_diet_log,
@@ -85,7 +144,25 @@ TABLES = [
     "weekly_reviews",
     "learning_plans",
     "weekly_ai_reviews",
+    "interview_sessions",
     "project_plans",
+    "knowledge_artifacts",
+    "unified_chat_messages",
+    "voice_conversations",
+    "voice_settings",
+    "user_memories",
+    "memory_embeddings",
+    "automations",
+    "automation_logs",
+    "notifications",
+    "daily_briefings",
+    "github_repositories",
+    "github_activity",
+    "agent_executions",
+    "tool_executions",
+    "router_executions",
+    "llm_requests",
+    "memory_retrievals",
 ]
 
 COURSE_LINK = "https://youtu.be/0Rwb4Xmlcwc?si=TDG5hZDWn0HAriFR"
@@ -413,6 +490,18 @@ def init_db() -> None:
                 created_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS interview_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                interview_type TEXT,
+                topic TEXT,
+                questions TEXT,
+                user_answers TEXT,
+                feedback TEXT,
+                score REAL DEFAULT 0,
+                created_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS project_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER,
@@ -424,12 +513,208 @@ def init_db() -> None:
                 resume_angle TEXT,
                 created_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS knowledge_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_type TEXT,
+                source_type TEXT,
+                source_id INTEGER,
+                title TEXT,
+                content TEXT,
+                tags TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS unified_chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT,
+                content TEXT,
+                selected_agent TEXT,
+                confidence REAL DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS voice_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_transcript TEXT,
+                assistant_response TEXT,
+                audio_file_path TEXT,
+                stt_model TEXT,
+                tts_model TEXT,
+                voice_name TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS voice_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voice_name TEXT,
+                tts_model TEXT,
+                stt_model TEXT,
+                speaking_speed REAL DEFAULT 0.95,
+                response_style TEXT,
+                autoplay_enabled INTEGER DEFAULT 1,
+                transcript_confirmation_enabled INTEGER DEFAULT 1,
+                save_audio_history_enabled INTEGER DEFAULT 1,
+                startup_greeting_enabled INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS user_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_type TEXT,
+                content TEXT NOT NULL,
+                source TEXT,
+                importance INTEGER DEFAULT 1,
+                pinned INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id INTEGER,
+                embedding_model TEXT,
+                embedding_json TEXT,
+                created_at TEXT,
+                FOREIGN KEY(memory_id) REFERENCES user_memories(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS automations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                description TEXT,
+                schedule_type TEXT,
+                run_time TEXT,
+                day_of_week TEXT,
+                day_of_month INTEGER DEFAULT 1,
+                action_type TEXT,
+                prompt TEXT,
+                enabled INTEGER DEFAULT 1,
+                last_run_at TEXT,
+                next_run_at TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS automation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                automation_id INTEGER,
+                automation_name TEXT,
+                action_type TEXT,
+                status TEXT,
+                message TEXT,
+                output TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                message TEXT,
+                category TEXT,
+                priority TEXT,
+                source TEXT,
+                is_read INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_briefings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                briefing_date TEXT UNIQUE,
+                morning_brief TEXT,
+                evening_brief TEXT,
+                study_summary TEXT,
+                health_summary TEXT,
+                career_summary TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS github_repositories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_name TEXT UNIQUE,
+                repo_url TEXT,
+                description TEXT,
+                language TEXT,
+                stars INTEGER DEFAULT 0,
+                forks INTEGER DEFAULT 0,
+                last_pushed_at TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS github_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_name TEXT,
+                activity_type TEXT,
+                title TEXT,
+                url TEXT,
+                activity_date TEXT,
+                metadata_json TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name TEXT,
+                prompt TEXT,
+                response_time_ms INTEGER DEFAULT 0,
+                success INTEGER DEFAULT 1,
+                error TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS tool_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT,
+                agent_name TEXT,
+                execution_time_ms INTEGER DEFAULT 0,
+                success INTEGER DEFAULT 1,
+                error TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS router_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt TEXT,
+                selected_agent TEXT,
+                confidence REAL DEFAULT 0,
+                execution_time_ms INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS llm_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model TEXT,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                estimated_cost REAL DEFAULT 0,
+                response_time_ms INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_retrievals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT,
+                memories_found INTEGER DEFAULT 0,
+                retrieval_time_ms INTEGER DEFAULT 0,
+                created_at TEXT
+            );
             """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_github_activity_unique "
+            "ON github_activity(repo_name, activity_type, url)"
         )
         ensure_weekly_backend_columns(conn)
         ensure_weekly_system_design_columns(conn)
         preload_backend_course(conn)
         preload_system_design_course(conn)
+        ensure_voice_conversation_columns(conn)
+    initialize_memory_tables()
+    initialize_automation_tables()
+    initialize_github_tables()
+    initialize_observability_tables()
+    initialize_voice_tables()
 
 
 def ensure_weekly_backend_columns(conn: sqlite3.Connection) -> None:
@@ -452,6 +737,19 @@ def ensure_weekly_system_design_columns(conn: sqlite3.Connection) -> None:
         "system_design_study_hours": "ALTER TABLE weekly_reviews ADD COLUMN system_design_study_hours REAL DEFAULT 0",
         "system_design_weak_areas": "ALTER TABLE weekly_reviews ADD COLUMN system_design_weak_areas TEXT",
         "system_design_next_focus": "ALTER TABLE weekly_reviews ADD COLUMN system_design_next_focus TEXT",
+    }
+    for column, sql in migrations.items():
+        if column not in columns:
+            conn.execute(sql)
+
+
+def ensure_voice_conversation_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(voice_conversations)").fetchall()}
+    migrations = {
+        "audio_file_path": "ALTER TABLE voice_conversations ADD COLUMN audio_file_path TEXT",
+        "stt_model": "ALTER TABLE voice_conversations ADD COLUMN stt_model TEXT",
+        "tts_model": "ALTER TABLE voice_conversations ADD COLUMN tts_model TEXT",
+        "voice_name": "ALTER TABLE voice_conversations ADD COLUMN voice_name TEXT",
     }
     for column, sql in migrations.items():
         if column not in columns:
@@ -553,6 +851,258 @@ def serialize_value(value):
     if isinstance(value, bool):
         return int(value)
     return value
+
+
+AGENT_REGISTRY = {
+    "gym_coach": {
+        "agent_id": "gym_coach",
+        "name": "Gym Coach Agent",
+        "description": "Analyzes workouts, Lyfta logs, progressive overload, gym split, cardio, steps, and recovery.",
+        "capabilities": ["workout analysis", "Lyfta workout parsing", "progressive overload", "gym split adherence", "save gym sessions"],
+        "example_prompts": ["Analyze today's workout", "Compare my push workout with last week", "Save this Lyfta workout"],
+        "bot_type": "gym",
+    },
+    "diet_coach": {
+        "agent_id": "diet_coach",
+        "name": "Diet Coach Agent",
+        "description": "Analyzes meals, calories, protein, macros, calorie deficit, and fat-loss suitability.",
+        "capabilities": ["meal analysis", "macro estimates", "protein target", "calorie deficit", "save diet logs"],
+        "example_prompts": ["Analyze today's diet", "Did I hit protein target?", "Save my meals"],
+        "bot_type": "diet",
+    },
+    "health_manager": {
+        "agent_id": "health_manager",
+        "name": "Health Manager Agent",
+        "description": "Creates daily and weekly health reports across gym, diet, weight, steps, recovery, and health score.",
+        "capabilities": ["health report", "weight trend", "steps", "recovery", "health score", "weekly health summary"],
+        "example_prompts": ["Generate my daily health report", "How is my recovery?", "Check my health score"],
+        "bot_type": "health_manager",
+    },
+    "learning_coach": {
+        "agent_id": "learning_coach",
+        "name": "Learning Coach Agent",
+        "description": "Plans daily study and balances DSA, backend, system design, AI cohort, projects, and revisions.",
+        "capabilities": ["daily study plan", "DSA planning", "backend learning", "system design", "weak areas", "revision due"],
+        "example_prompts": ["What should I study today?", "Create today's study plan", "What are my weak areas?"],
+        "bot_type": "learning_coach",
+    },
+    "weekly_review": {
+        "agent_id": "weekly_review",
+        "name": "Weekly Review Agent",
+        "description": "Reviews the full week across study, coding, GitHub, gym, diet, consistency, burnout risk, wins, misses, and next focus.",
+        "capabilities": ["weekly review", "github activity", "coding activity", "burnout risk", "weekly score", "wins and misses", "next week focus"],
+        "example_prompts": ["Generate this week's review", "Summarize my GitHub activity this week", "What did I miss this week?", "Plan next week"],
+        "bot_type": "weekly_review",
+    },
+    "resume_interview": {
+        "agent_id": "resume_interview",
+        "name": "Resume & Interview Coach Agent",
+        "description": "Assesses interview readiness, GitHub proof of work, resume bullets, mock interview questions, DSA, backend, system design, and project stories.",
+        "capabilities": ["resume bullets", "github proof", "coding activity", "mock interview", "interview readiness", "project storytelling", "SDE2 prep"],
+        "example_prompts": ["Generate resume bullets", "Use GitHub activity for my resume", "Give me mock interview questions", "Assess my interview readiness"],
+        "bot_type": "resume_interview",
+    },
+    "project_mentor": {
+        "agent_id": "project_mentor",
+        "name": "Project Mentor Agent",
+        "description": "Creates project roadmaps, next tasks, README improvements, architecture notes, risks, resume positioning, and GitHub activity analysis.",
+        "capabilities": ["project roadmap", "github", "commits", "repository", "pull request", "next tasks", "README", "architecture", "portfolio gaps", "resume angle"],
+        "example_prompts": ["Create a roadmap for my project", "Analyze my GitHub project activity", "What should I build next?", "Improve my README"],
+        "bot_type": "project_mentor",
+    },
+    "knowledge_assistant": {
+        "agent_id": "knowledge_assistant",
+        "name": "Notes & Knowledge Assistant Agent",
+        "description": "Searches notes, summarizes knowledge, creates flashcards, revision questions, and connects concepts across tracks.",
+        "capabilities": ["search notes", "summarize notes", "flashcards", "revision questions", "knowledge artifacts"],
+        "example_prompts": ["Summarize my JWT notes", "Create flashcards", "Generate revision questions for indexing"],
+        "bot_type": "knowledge_assistant",
+    },
+}
+
+
+ROUTER_KEYWORDS = {
+    "gym_coach": ["workout", "lyfta", "push", "pull", "legs", "sets", "reps", "volume", "cardio", "gym", "split"],
+    "diet_coach": ["diet", "meal", "protein", "calories", "calorie", "macros", "fat loss", "deficit", "breakfast", "lunch", "dinner"],
+    "health_manager": ["health", "weight", "steps", "recovery", "health score", "daily health", "weekly health"],
+    "learning_coach": ["study", "dsa", "backend", "system design", "ai cohort", "revision", "weak areas", "plan today"],
+    "weekly_review": ["weekly review", "this week", "next week", "burnout", "wins", "misses", "consistency", "github activity"],
+    "resume_interview": ["resume", "interview", "mock", "readiness", "sde2", "questions", "job", "github", "commit"],
+    "project_mentor": ["project", "roadmap", "readme", "portfolio", "architecture", "milestone", "tasks", "github", "repo", "repository", "commit", "pull request", "pr"],
+    "knowledge_assistant": ["notes", "note", "flashcard", "summarize", "knowledge", "revise", "revision questions"],
+}
+
+
+for agent_config in AGENT_REGISTRY.values():
+    agent_config["run_function"] = run_health_agent
+
+
+def agent_search_text(agent: dict) -> str:
+    return " ".join([agent["name"], agent["description"], " ".join(agent["capabilities"]), " ".join(agent["example_prompts"])]).lower()
+
+
+def rank_agents_rule_based(prompt: str) -> list[dict]:
+    prompt_lower = prompt.lower()
+    prompt_terms = {term for term in re.split(r"[^a-z0-9+#.]+", prompt_lower) if len(term) > 2}
+    ranked = []
+    for agent_id, agent in AGENT_REGISTRY.items():
+        search_text = agent_search_text(agent)
+        score = 0.0
+        for term in prompt_terms:
+            if term in search_text:
+                score += 1.0
+        for phrase in ROUTER_KEYWORDS.get(agent_id, []):
+            if phrase in prompt_lower:
+                score += 3.0 if " " in phrase else 1.8
+        for example in agent["example_prompts"]:
+            example_terms = {term for term in re.split(r"[^a-z0-9+#.]+", example.lower()) if len(term) > 2}
+            score += len(prompt_terms & example_terms) * 0.7
+        ranked.append({"agent_id": agent_id, "name": agent["name"], "score": round(score, 2), "confidence": 0.0, "reason": "Rule-based match against description, capabilities, examples, and keywords."})
+
+    ranked = sorted(ranked, key=lambda item: item["score"], reverse=True)
+    for item in ranked:
+        item["confidence"] = round(min(item["score"] / 12, 1), 2)
+    return ranked
+
+
+def openai_route_agent(prompt: str) -> dict | None:
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    router_agents = [
+        {
+            "agent_id": agent_id,
+            "name": agent["name"],
+            "description": agent["description"],
+            "capabilities": agent["capabilities"],
+            "example_prompts": agent["example_prompts"],
+        }
+        for agent_id, agent in AGENT_REGISTRY.items()
+    ]
+    try:
+        client = OpenAI()
+        started = datetime.now()
+        response = client.chat.completions.create(
+            model=os.getenv("OPENAI_ROUTER_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")),
+            messages=[
+                {"role": "system", "content": "Route the user prompt to exactly one agent. Return only JSON with selected_agent, confidence, and reason."},
+                {"role": "user", "content": json.dumps({"prompt": prompt, "agents": router_agents})},
+            ],
+            response_format={"type": "json_object"},
+        )
+        elapsed_ms = int((datetime.now() - started).total_seconds() * 1000)
+        usage = getattr(response, "usage", None)
+        if usage:
+            log_llm_request(
+                response.model or os.getenv("OPENAI_ROUTER_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")),
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+                getattr(usage, "total_tokens", 0) or 0,
+                elapsed_ms,
+            )
+        parsed = json.loads(response.choices[0].message.content or "{}")
+        if parsed.get("selected_agent") in AGENT_REGISTRY:
+            return {"agent_id": parsed.get("selected_agent"), "confidence": float(parsed.get("confidence", 0) or 0), "reason": parsed.get("reason", "OpenAI router classification.")}
+    except Exception:
+        return None
+    return None
+
+
+def route_command_center_prompt(prompt: str) -> dict:
+    started = datetime.now()
+    ranked = rank_agents_rule_based(prompt)
+    selected = ranked[0]["agent_id"] if ranked else "learning_coach"
+    confidence = ranked[0]["confidence"] if ranked else 0.0
+    reason = ranked[0]["reason"] if ranked else "No strong rule-based match."
+    router_result = openai_route_agent(prompt)
+    if router_result and router_result["confidence"] >= 0.55:
+        selected = router_result["agent_id"]
+        confidence = round(router_result["confidence"], 2)
+        reason = router_result["reason"]
+        for item in ranked:
+            if item["agent_id"] == selected:
+                item["confidence"] = max(item["confidence"], confidence)
+                item["reason"] = reason
+        ranked = sorted(ranked, key=lambda item: item["confidence"], reverse=True)
+
+    elapsed_ms = int((datetime.now() - started).total_seconds() * 1000)
+    log_router_execution(prompt, selected, confidence, elapsed_ms)
+    return {"selected_agent": selected, "confidence": confidence, "reason": reason, "ranked_agents": ranked[:3], "ambiguous": confidence < 0.3}
+
+
+def select_command_center_agents(routing: dict) -> list[str]:
+    ranked = routing.get("ranked_agents", [])
+    if routing.get("ambiguous"):
+        return []
+
+    selected = routing["selected_agent"]
+    selected_agents = [selected]
+    for item in ranked:
+        agent_id = item["agent_id"]
+        if agent_id == selected:
+            continue
+        if item.get("confidence", 0) >= 0.45 and item.get("score", 0) >= 5:
+            selected_agents.append(agent_id)
+        if len(selected_agents) >= 3:
+            break
+    return selected_agents
+
+
+def run_command_center_agents(prompt: str, agent_ids: list[str], context_prefix: str = "") -> str:
+    responses = []
+    agent_prompt = f"{context_prefix}\n\nUser request: {prompt}" if context_prefix else prompt
+    for agent_id in agent_ids:
+        agent = AGENT_REGISTRY[agent_id]
+        response = agent["run_function"](agent["bot_type"], agent_prompt)
+        if response:
+            responses.append(response)
+    if not responses:
+        return "I need a little more context before I can help. Do you mean food, workout, study, projects, notes, or interview prep?"
+    if len(responses) == 1:
+        return responses[0]
+    return "\n\n".join(responses)
+
+
+def execute_command_center_prompt(prompt: str, context_prefix: str = "") -> tuple[str, dict]:
+    routing = route_command_center_prompt(prompt)
+    agent_ids = select_command_center_agents(routing)
+    selected_agents_value = ",".join(agent_ids) if agent_ids else ""
+    save_unified_chat_message("user", prompt, selected_agents_value, routing["confidence"])
+    if not agent_ids:
+        response = "Do you want me to help with food, workout, study, projects, notes, or interview prep?"
+    else:
+        response = run_command_center_agents(prompt, agent_ids, context_prefix)
+    autosave_memories(prompt, response, source="mythos")
+    save_unified_chat_message("assistant", response, selected_agents_value, routing["confidence"])
+    return response, routing
+
+
+def save_unified_chat_message(role: str, content: str, selected_agent: str = "", confidence: float = 0.0) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO unified_chat_messages (role, content, selected_agent, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (role, content, selected_agent, confidence, datetime.now().isoformat()),
+        )
+
+
+def get_recent_unified_chat(limit: int = 12) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM unified_chat_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return list(reversed([dict(row) for row in rows]))
+
+
+def mythos_startup_greeting(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    hour = current.hour
+    if 5 <= hour < 12:
+        return "Good morning, Rushikesh. Mythos is online. Let's make today count."
+    if 12 <= hour < 17:
+        return "Good afternoon, Rushikesh. Ready when you are."
+    if 17 <= hour < 22:
+        return "Good evening, Rushikesh. Let's review the day and plan what matters next."
+    return "Welcome back, Rushikesh. I'll keep this concise."
 
 
 def current_week_range(today: date) -> tuple[date, date]:
@@ -706,7 +1256,13 @@ def dashboard() -> None:
     system_design_course = read_table("system_design_course")
     learning_plans = read_table("learning_plans")
     weekly_ai_reviews = read_table("weekly_ai_reviews")
+    interview_sessions = read_table("interview_sessions")
     project_plans = read_table("project_plans")
+    knowledge_artifacts = read_table("knowledge_artifacts")
+    unified_messages = read_table("unified_chat_messages")
+    automations_df = read_table("automations")
+    github_repos = read_table("github_repositories")
+    github_activity = read_table("github_activity")
 
     if not daily.empty:
         daily["date_dt"] = pd.to_datetime(daily["date"], errors="coerce")
@@ -744,6 +1300,16 @@ def dashboard() -> None:
     latest_weekly_review = pd.Series(dtype=object)
     if not weekly_ai_reviews.empty:
         latest_weekly_review = weekly_ai_reviews.sort_values(["week_start", "id"]).iloc[-1]
+    backend_readiness = get_backend_readiness()
+    dsa_readiness = get_dsa_interview_readiness()
+    system_design_readiness = get_system_design_readiness()
+    portfolio_summary = get_project_portfolio_summary()
+    ai_readiness = int((cohort_progress * 0.6) + (portfolio_summary.get("portfolio_readiness", 0) * 0.4))
+    latest_interview_score = 0
+    next_mock = backend_readiness.get("next_focus") or system_design_readiness.get("next_focus") or dsa_readiness.get("next_focus")
+    if not interview_sessions.empty:
+        latest_interview = interview_sessions.sort_values(["date", "id"]).iloc[-1]
+        latest_interview_score = int(float(latest_interview.get("score", 0) or 0))
     active_project = pd.Series(dtype=object)
     latest_project_plan = pd.Series(dtype=object)
     if not projects.empty:
@@ -753,6 +1319,19 @@ def dashboard() -> None:
             matching_plans = project_plans[project_plans["project_id"] == int(active_project["id"])]
             if not matching_plans.empty:
                 latest_project_plan = matching_plans.sort_values("id").iloc[-1]
+    recent_note_titles = ", ".join(read_table("notes").sort_values(["date", "id"]).tail(3)["title"].tolist()) if not read_table("notes").empty else "No notes yet"
+    flashcards_created = 0
+    revision_questions_created = 0
+    if not knowledge_artifacts.empty:
+        flashcards_created = int(knowledge_artifacts["artifact_type"].fillna("").str.contains("flashcard", case=False).sum())
+        revision_questions_created = int(knowledge_artifacts["artifact_type"].fillna("").str.contains("revision", case=False).sum())
+    assistant_unified = unified_messages[unified_messages["role"] == "assistant"] if not unified_messages.empty else pd.DataFrame()
+    recent_command_text = "No command center conversations yet."
+    if not assistant_unified.empty:
+        recent_command_text = " | ".join(assistant_unified.sort_values("id").tail(3)["content"].fillna("").str.slice(0, 80).tolist())
+    github_summary = github_weekly_summary(week_start.isoformat(), week_end.isoformat())
+    github_trend = pd.DataFrame(github_activity_trend(14))
+    observability_summary = observability_dashboard_summary()
 
     st.subheader("This Week")
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -767,7 +1346,67 @@ def dashboard() -> None:
     with m5:
         metric_card("Consistency", f"{consistency}/7")
 
-    st.subheader("Learning Coach")
+    st.subheader("Mythos")
+    metric_card("Recent Conversations", len(assistant_unified))
+    st.caption(recent_command_text)
+
+    st.subheader("Observability")
+    o1, o2, o3, o4, o5 = st.columns(5)
+    with o1:
+        metric_card("Today's Requests", observability_summary.get("today_requests", 0))
+    with o2:
+        metric_card("Today's Cost", f"${observability_summary.get('today_cost', 0):.4f}")
+    with o3:
+        metric_card("Most Used Agent", observability_summary.get("most_used_agent", "None"))
+    with o4:
+        metric_card("Avg Response", f"{observability_summary.get('average_response_time_ms', 0)} ms")
+    with o5:
+        metric_card("Errors Today", observability_summary.get("error_count", 0))
+
+    st.subheader("Automation")
+    notification_rows = latest_notifications(5)
+    unread_count = sum(1 for row in notification_rows if not row.get("is_read"))
+    latest_briefing = get_latest_daily_briefing()
+    if automations_df.empty:
+        st.info("No automations configured yet.")
+    else:
+        upcoming = automations_df[automations_df["enabled"] == 1].sort_values("next_run_at").head(3)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.write(f"**Notification Bell ({unread_count})**")
+            show_dataframe(pd.DataFrame(notification_rows)[["title", "category", "priority", "created_at"]] if notification_rows else pd.DataFrame(), "No notifications yet.")
+        with c2:
+            st.write("**Daily Briefing**")
+            if latest_briefing:
+                st.write(f"**{latest_briefing.get('briefing_date', '')}**")
+                st.caption(latest_briefing.get("morning_brief") or latest_briefing.get("evening_brief") or "Briefing saved.")
+            else:
+                st.info("No briefing yet.")
+        with c3:
+            st.write("**Upcoming**")
+            show_dataframe(upcoming[["name", "next_run_at", "action_type"]], "No upcoming automations.")
+        reports = latest_reports(3)
+        if reports:
+            st.write("**Latest Reports**")
+            show_dataframe(pd.DataFrame(reports)[["title", "category", "priority", "created_at"]])
+
+    st.subheader("GitHub Activity")
+    g1, g2, g3, g4 = st.columns(4)
+    with g1:
+        metric_card("Commits This Week", github_summary.get("commits", 0))
+    with g2:
+        metric_card("Active Repo", github_summary.get("active_repo") or "No activity")
+    with g3:
+        metric_card("Last Pushed Repo", github_summary.get("last_pushed_repo") or "Not synced")
+    with g4:
+        metric_card("Tracked Repos", len(github_repos))
+    if github_activity.empty:
+        st.caption("Sync GitHub from the GitHub Integration page to populate coding activity.")
+    elif not github_trend.empty:
+        trend_chart = github_trend.rename(columns={"activity_day": "Date", "activity_type": "Type", "count": "Count"})
+        st.line_chart(trend_chart, x="Date", y="Count", color="Type", use_container_width=True)
+
+    st.subheader("Study Planning")
     l1, l2, l3, l4 = st.columns(4)
     weak_topics = ", ".join((dsa_summary.get("weak_topics") or [])[:3] + (backend_summary.get("weak_topics") or [])[:3])
     with l1:
@@ -779,12 +1418,12 @@ def dashboard() -> None:
     with l4:
         metric_card("Project Focus", project_summary.get("project_focus") or "No active project")
     if latest_learning_plan.empty:
-        st.caption("Generate a Learning Coach Agent plan to show today's AI-generated plan here.")
+        st.caption("Ask Mythos for today's study plan to show it here.")
     else:
         st.write(f"**Today's AI Plan:** {latest_learning_plan.get('focus_area', '')}")
         st.caption(str(latest_learning_plan.get("recommended_tasks", "")))
 
-    st.subheader("Weekly Review Agent")
+    st.subheader("Weekly Review")
     w1, w2, w3, w4, w5 = st.columns(5)
     with w1:
         metric_card("Latest Weekly Score", latest_weekly_review.get("study_score", 0) if not latest_weekly_review.empty else 0)
@@ -799,7 +1438,22 @@ def dashboard() -> None:
     if not latest_weekly_review.empty:
         st.caption(f"Next week focus: {latest_weekly_review.get('next_week_focus', '')}")
 
-    st.subheader("Project Mentor")
+    st.subheader("Resume & Interview Readiness")
+    i1, i2, i3, i4, i5, i6 = st.columns(6)
+    with i1:
+        metric_card("Backend Readiness", f"{backend_readiness.get('readiness', 0)}%")
+    with i2:
+        metric_card("AI Engineer Readiness", f"{ai_readiness}%")
+    with i3:
+        metric_card("DSA Readiness", f"{dsa_readiness.get('readiness', 0)}%")
+    with i4:
+        metric_card("System Design", f"{system_design_readiness.get('readiness', 0)}%")
+    with i5:
+        metric_card("Latest Mock Score", latest_interview_score)
+    with i6:
+        metric_card("Next Mock", next_mock or "Backend fundamentals")
+
+    st.subheader("Project Focus")
     p1, p2, p3, p4, p5 = st.columns(5)
     next_tasks_text = str(latest_project_plan.get("next_tasks", "") if not latest_project_plan.empty else active_project.get("next_task", "") if not active_project.empty else "")
     next_tasks = [line.strip(" -0123456789.") for line in next_tasks_text.splitlines() if line.strip()]
@@ -813,6 +1467,17 @@ def dashboard() -> None:
         metric_card("Project Risk", latest_project_plan.get("risks", "Generate plan") if not latest_project_plan.empty else active_project.get("blockers", "None") if not active_project.empty else "No project")
     with p5:
         metric_card("Resume Angle", latest_project_plan.get("resume_angle", "Generate plan") if not latest_project_plan.empty else "Generate plan")
+
+    st.subheader("Notes & Knowledge")
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        metric_card("Recent Notes", recent_note_titles)
+    with k2:
+        metric_card("Revision Questions Due", revision_due_items.get("total_due", 0))
+    with k3:
+        metric_card("Flashcards Created", flashcards_created)
+    with k4:
+        metric_card("Weak Knowledge Areas", weak_topics or "None logged")
 
     st.subheader("Backend Course")
     b1, b2, b3, b4, b5 = st.columns(5)
@@ -1570,6 +2235,96 @@ def project_mentor_agent_page() -> None:
         show_dataframe(logs, "No project mentor tool logs yet.")
 
 
+def resume_interview_coach_page() -> None:
+    st.title("Resume & Interview Coach Agent")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    sessions_df = read_table("interview_sessions")
+    projects_df = read_table("projects")
+    backend_ready = get_backend_readiness()
+    dsa_ready = get_dsa_interview_readiness()
+    system_ready = get_system_design_readiness()
+    portfolio = get_project_portfolio_summary()
+
+    ai_progress = 0
+    cohort_df = read_table("ai_cohort")
+    if not cohort_df.empty:
+        ai_progress = int(cohort_df["completion_percentage"].fillna(0).mean())
+    ai_ready = int((ai_progress * 0.6) + (portfolio.get("portfolio_readiness", 0) * 0.4))
+    latest_score = 0
+    if not sessions_df.empty:
+        latest_score = int(float(sessions_df.sort_values(["date", "id"]).iloc[-1].get("score", 0) or 0))
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("Backend SDE2", f"{backend_ready.get('readiness', 0)}%")
+    with c2:
+        metric_card("AI Engineer", f"{ai_ready}%")
+    with c3:
+        metric_card("DSA", f"{dsa_ready.get('readiness', 0)}%")
+    with c4:
+        metric_card("System Design", f"{system_ready.get('readiness', 0)}%")
+    with c5:
+        metric_card("Latest Mock", latest_score)
+
+    project_options = {"All projects": 0}
+    if not projects_df.empty:
+        project_options.update({f"{int(row['id'])} - {row['project_name']}": int(row["id"]) for _, row in projects_df.iterrows()})
+    selected_project = st.selectbox("Resume bullet source", list(project_options.keys()))
+    selected_project_id = project_options[selected_project]
+
+    topic = st.text_input("Mock interview topic", value=backend_ready.get("next_focus") or "Backend fundamentals")
+    user_answers = st.text_area("Paste your mock answers for feedback", height=160)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Assess Readiness", use_container_width=True):
+            with st.spinner("Calling interview readiness tools..."):
+                response = run_health_agent("resume_interview", "Assess my Backend SDE2 and AI Engineer interview readiness.")
+            st.session_state.resume_interview_last_response = response
+    with c2:
+        if st.button("Generate Resume Bullets", use_container_width=True):
+            project_text = f" for project_id {selected_project_id}" if selected_project_id else ""
+            with st.spinner("Calling portfolio and resume tools..."):
+                response = run_health_agent("resume_interview", f"Generate resume bullets{project_text}.")
+            st.session_state.resume_interview_last_response = response
+    with c3:
+        if st.button("Run Mock Interview", use_container_width=True):
+            prompt = f"Generate mock interview questions for topic: {topic}."
+            if user_answers.strip():
+                prompt += f"\nEvaluate these answers and save the interview session:\n{user_answers}"
+            with st.spinner("Calling mock interview tools..."):
+                response = run_health_agent("resume_interview", prompt)
+            st.session_state.resume_interview_last_response = response
+
+    prompt = st.chat_input("Ask for resume bullets, readiness, questions, or answer feedback")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling resume and interview tools..."):
+                response = run_health_agent("resume_interview", prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("resume_interview_last_response", "")
+    if last_response:
+        st.subheader("Latest Coach Response")
+        st.write(last_response)
+
+    st.subheader("Recent Resume & Interview Messages")
+    for message in get_recent_chat_messages("resume_interview", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Saved Interview Sessions")
+    show_dataframe(sessions_df, "No interview sessions saved yet.")
+
+    with st.expander("Recent resume/interview tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("resume_interview", 50))
+        show_dataframe(logs, "No resume/interview tool logs yet.")
+
+
 def notes_page() -> None:
     st.title("Notes / Learnings")
     with st.form("notes_form", clear_on_submit=True):
@@ -1619,6 +2374,686 @@ def notes_page() -> None:
         )
         df = df[mask]
     show_dataframe(df)
+
+
+def memory_management_page() -> None:
+    st.title("Mythos Memory")
+    st.caption("Manage what Mythos remembers across study, health, projects, notes, and interview prep.")
+    initialize_memory_tables()
+
+    with st.form("add_memory_form", clear_on_submit=True):
+        st.subheader("Add Memory")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            memory_type = st.selectbox("Type", ["goal", "preference", "struggle", "fact", "plan", "other"])
+        with c2:
+            importance = st.slider("Importance", 1, 5, 3)
+        with c3:
+            pinned = st.checkbox("Pin")
+        content = st.text_area("Memory")
+        submitted = st.form_submit_button("Save Memory")
+    if submitted:
+        result = save_memory(content, memory_type=memory_type, source="manual", importance=importance, pinned=pinned)
+        if result.get("saved"):
+            st.success("Memory saved.")
+        else:
+            st.info(result.get("reason", "Memory was not saved."))
+
+    query = st.text_input("Search memories", placeholder="goals, diet preference, weak topic, project plan...")
+    if query:
+        memories = search_memory(query, top_k=20)
+        df = pd.DataFrame(memories)
+    else:
+        df = pd.DataFrame(get_all_memories())
+
+    if df.empty:
+        st.info("No memories yet.")
+        return
+
+    st.subheader("Memories")
+    show_dataframe(df)
+
+    selected_id = st.selectbox("Select memory to edit", df["id"].astype(int).tolist())
+    selected = df[df["id"] == selected_id].iloc[0]
+    with st.form("edit_memory_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            edit_type = st.selectbox(
+                "Edit type",
+                ["goal", "preference", "struggle", "fact", "plan", "other"],
+                index=["goal", "preference", "struggle", "fact", "plan", "other"].index(selected.get("memory_type", "fact"))
+                if selected.get("memory_type", "fact") in ["goal", "preference", "struggle", "fact", "plan", "other"]
+                else 3,
+            )
+        with c2:
+            edit_importance = st.slider("Edit importance", 1, 5, int(selected.get("importance", 3) or 3))
+        with c3:
+            edit_pinned = st.checkbox("Pinned", value=bool(selected.get("pinned", 0)))
+        edit_content = st.text_area("Edit memory", value=selected.get("content", ""))
+        c1, c2 = st.columns(2)
+        with c1:
+            update_submitted = st.form_submit_button("Update Memory")
+        with c2:
+            delete_submitted = st.form_submit_button("Delete Memory")
+
+    if update_submitted:
+        update_memory(
+            int(selected_id),
+            edit_content,
+            edit_type,
+            selected.get("source", "manual"),
+            edit_importance,
+            edit_pinned,
+        )
+        st.success("Memory updated.")
+        st.rerun()
+    if delete_submitted:
+        delete_memory(int(selected_id))
+        st.success("Memory deleted.")
+        st.rerun()
+
+
+def automations_page() -> None:
+    st.title("Automations")
+    st.caption("Mythos can proactively create reminders, briefs, checks, and reports from your tracker data.")
+    initialize_automation_tables()
+
+    automations = list_automations()
+    if not automations:
+        st.info("No automations configured.")
+        return
+
+    automations_df = pd.DataFrame(automations)
+    enabled_count = int(automations_df["enabled"].fillna(0).sum())
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_card("Enabled", enabled_count)
+    with c2:
+        metric_card("Total", len(automations_df))
+    with c3:
+        next_run = automations_df[automations_df["enabled"] == 1].sort_values("next_run_at").head(1)
+        metric_card("Next Run", next_run.iloc[0]["next_run_at"] if not next_run.empty else "None")
+
+    st.subheader("Manage Automations")
+    for automation in automations:
+        with st.expander(f"{automation['name']} - {automation['action_type']}", expanded=False):
+            st.write(automation.get("description", ""))
+            st.caption(f"Schedule: {automation.get('schedule_type')} at {automation.get('run_time')} | Next: {automation.get('next_run_at')}")
+            enabled = st.toggle(
+                "Enabled",
+                value=bool(automation.get("enabled", 1)),
+                key=f"automation_enabled_{automation['id']}",
+            )
+            if enabled != bool(automation.get("enabled", 1)):
+                update_automation_enabled(int(automation["id"]), enabled)
+                st.success("Automation updated.")
+                st.rerun()
+            if st.button("Run now", key=f"run_automation_{automation['id']}"):
+                with st.spinner("Running automation..."):
+                    result = run_automation(int(automation["id"]), lambda prompt: execute_command_center_prompt(prompt)[0])
+                if result.get("ran"):
+                    st.success("Automation completed.")
+                    st.write(result.get("output", ""))
+                else:
+                    st.error(result.get("message") or result.get("reason") or "Automation failed.")
+
+    st.subheader("Execution History")
+    logs_df = pd.DataFrame(list_automation_logs(100))
+    show_dataframe(logs_df, "No automation runs yet.")
+
+
+def notifications_page() -> None:
+    st.title("Notifications")
+    st.caption("Proactive messages and reports generated by Mythos automations.")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        category = st.selectbox("Category", ["All", "study", "health", "career", "project", "system"])
+    with c2:
+        priority = st.selectbox("Priority", ["All", "low", "medium", "high"])
+    with c3:
+        include_read = st.checkbox("Include read", value=True)
+
+    notifications = list_notifications(category, priority, include_read)
+    if not notifications:
+        st.info("No notifications found.")
+    else:
+        for notification in notifications:
+            read_label = "Read" if notification.get("is_read") else "Unread"
+            with st.expander(
+                f"{notification.get('title', 'Notification')} - {notification.get('priority', 'medium')} - {read_label}",
+                expanded=not bool(notification.get("is_read")),
+            ):
+                st.caption(f"{notification.get('category', 'system')} | {notification.get('source', '')} | {notification.get('created_at', '')}")
+                st.write(notification.get("message", ""))
+                if not notification.get("is_read"):
+                    if st.button("Mark as read", key=f"mark_read_{notification['id']}"):
+                        mark_notification_read(int(notification["id"]), True)
+                        st.rerun()
+
+    st.subheader("Daily Briefings")
+    briefings_df = read_table("daily_briefings")
+    show_dataframe(briefings_df, "No daily briefings yet.")
+
+
+def observability_center_page() -> None:
+    st.title("Observability Center")
+    st.caption("Local analytics for Mythos agent, tool, router, LLM, memory, cost, errors, and latency activity.")
+    initialize_observability_tables()
+
+    summary = observability_dashboard_summary()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("Today's Requests", summary.get("today_requests", 0))
+    with c2:
+        metric_card("Today's Cost", f"${summary.get('today_cost', 0):.4f}")
+    with c3:
+        metric_card("Most Used Agent", summary.get("most_used_agent", "None"))
+    with c4:
+        metric_card("Avg Response", f"{summary.get('average_response_time_ms', 0)} ms")
+    with c5:
+        metric_card("Errors Today", summary.get("error_count", 0))
+
+    tabs = st.tabs([
+        "Overview",
+        "Agents",
+        "Tools",
+        "Router",
+        "LLM & Cost",
+        "Memory",
+        "Errors",
+        "Latency",
+    ])
+
+    with tabs[0]:
+        requests_day = daily_metric("llm_requests", "count")
+        tokens_day = daily_metric("llm_requests", "tokens")
+        cost_day = daily_metric("llm_requests", "cost")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Requests/day")
+            if requests_day.empty:
+                st.info("No LLM requests logged yet.")
+            else:
+                st.line_chart(requests_day, x="day", y="value", use_container_width=True)
+        with c2:
+            st.subheader("Tokens/day")
+            if tokens_day.empty:
+                st.info("No token usage logged yet.")
+            else:
+                st.line_chart(tokens_day, x="day", y="value", use_container_width=True)
+        st.subheader("Cost/day")
+        if cost_day.empty:
+            st.info("No cost data logged yet.")
+        else:
+            st.line_chart(cost_day, x="day", y="value", use_container_width=True)
+
+    with tabs[1]:
+        st.subheader("Agent Analytics")
+        agent_usage = top_counts("agent_executions", "agent_name")
+        agent_df = read_observability_table("agent_executions")
+        if agent_usage.empty:
+            st.info("No agent executions logged yet.")
+        else:
+            st.bar_chart(agent_usage, x="name", y="count", use_container_width=True)
+        show_dataframe(agent_df, "No agent executions logged yet.")
+
+    with tabs[2]:
+        st.subheader("Tool Analytics")
+        tool_usage = top_counts("tool_executions", "tool_name")
+        tool_df = read_observability_table("tool_executions")
+        if tool_usage.empty:
+            st.info("No tool executions logged yet.")
+        else:
+            st.bar_chart(tool_usage, x="name", y="count", use_container_width=True)
+        show_dataframe(tool_df, "No tool executions logged yet.")
+
+    with tabs[3]:
+        st.subheader("Router Analytics")
+        router_usage = top_counts("router_executions", "selected_agent")
+        router_df = read_observability_table("router_executions")
+        if router_usage.empty:
+            st.info("No router executions logged yet.")
+        else:
+            st.bar_chart(router_usage, x="name", y="count", use_container_width=True)
+        if not router_df.empty:
+            confidence_df = router_df.copy()
+            confidence_df["created_day"] = pd.to_datetime(confidence_df["created_at"], errors="coerce").dt.date.astype(str)
+            confidence_day = confidence_df.groupby("created_day", as_index=False)["confidence"].mean()
+            st.line_chart(confidence_day, x="created_day", y="confidence", use_container_width=True)
+        show_dataframe(router_df, "No router executions logged yet.")
+
+    with tabs[4]:
+        st.subheader("LLM Analytics and Cost Dashboard")
+        llm_df = read_observability_table("llm_requests")
+        model_usage = top_counts("llm_requests", "model")
+        c1, c2 = st.columns(2)
+        with c1:
+            if model_usage.empty:
+                st.info("No model usage logged yet.")
+            else:
+                st.bar_chart(model_usage, x="name", y="count", use_container_width=True)
+        with c2:
+            cost_day = daily_metric("llm_requests", "cost")
+            if cost_day.empty:
+                st.info("No cost data logged yet.")
+            else:
+                st.line_chart(cost_day, x="day", y="value", use_container_width=True)
+        show_dataframe(llm_df, "No LLM requests logged yet.")
+
+    with tabs[5]:
+        st.subheader("Memory Analytics")
+        memory_df = read_observability_table("memory_retrievals")
+        if memory_df.empty:
+            st.info("No memory retrievals logged yet.")
+        else:
+            daily_memory = memory_df.copy()
+            daily_memory["created_day"] = pd.to_datetime(daily_memory["created_at"], errors="coerce").dt.date.astype(str)
+            found_day = daily_memory.groupby("created_day", as_index=False)["memories_found"].sum()
+            latency_day = daily_memory.groupby("created_day", as_index=False)["retrieval_time_ms"].mean()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.line_chart(found_day, x="created_day", y="memories_found", use_container_width=True)
+            with c2:
+                st.line_chart(latency_day, x="created_day", y="retrieval_time_ms", use_container_width=True)
+        show_dataframe(memory_df, "No memory retrievals logged yet.")
+
+    with tabs[6]:
+        st.subheader("Error Dashboard")
+        agent_errors = daily_metric("agent_executions", "errors")
+        tool_errors = daily_metric("tool_executions", "errors")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("Agent error trends")
+            if agent_errors.empty:
+                st.info("No agent errors logged.")
+            else:
+                st.line_chart(agent_errors, x="day", y="value", use_container_width=True)
+        with c2:
+            st.write("Tool error trends")
+            if tool_errors.empty:
+                st.info("No tool errors logged.")
+            else:
+                st.line_chart(tool_errors, x="day", y="value", use_container_width=True)
+        agent_df = read_observability_table("agent_executions")
+        tool_df = read_observability_table("tool_executions")
+        errors = []
+        if not agent_df.empty:
+            errors.append(agent_df[agent_df["success"] == 0].assign(source="agent"))
+        if not tool_df.empty:
+            errors.append(tool_df[tool_df["success"] == 0].assign(source="tool"))
+        error_df = pd.concat(errors, ignore_index=True) if errors else pd.DataFrame()
+        show_dataframe(error_df, "No execution errors logged.")
+
+    with tabs[7]:
+        st.subheader("Latency Dashboard")
+        agent_latency = daily_metric("agent_executions", "latency")
+        llm_latency = daily_metric("llm_requests", "latency")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("Agent latency trends")
+            if agent_latency.empty:
+                st.info("No agent latency logged yet.")
+            else:
+                st.line_chart(agent_latency, x="day", y="value", use_container_width=True)
+        with c2:
+            st.write("LLM latency trends")
+            if llm_latency.empty:
+                st.info("No LLM latency logged yet.")
+            else:
+                st.line_chart(llm_latency, x="day", y="value", use_container_width=True)
+
+
+def github_integration_page() -> None:
+    st.title("GitHub Integration")
+    st.caption("Track coding activity so Mythos can connect project work with learning plans, reviews, and career readiness.")
+    initialize_github_tables()
+
+    if not github_is_configured():
+        st.warning("GITHUB_TOKEN not found. Add GITHUB_TOKEN to your environment to sync repositories and activity.")
+
+    username = st.text_input(
+        "GitHub username",
+        value=st.session_state.get("github_username", ""),
+        placeholder="Leave blank to sync the authenticated token user",
+    )
+    st.session_state.github_username = username.strip()
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        sync_clicked = st.button("Sync repositories", use_container_width=True, disabled=not github_is_configured())
+    with c2:
+        refresh_clicked = st.button("Refresh saved data", use_container_width=True)
+    with c3:
+        st.caption("Use a GitHub token with repo read access. Public-only tokens can still sync public activity.")
+
+    if sync_clicked:
+        with st.spinner("Syncing GitHub repositories, commits, pull requests, and issues..."):
+            try:
+                result = sync_github_activity(username.strip() or None)
+                st.success(f"Synced {result.get('repositories', 0)} repositories and {result.get('activity_items', 0)} activity items.")
+                if result.get("errors"):
+                    st.warning("Some repositories could not be fully synced.")
+                    for error in result["errors"][:5]:
+                        st.caption(error)
+            except Exception as exc:
+                st.error(str(exc))
+    if refresh_clicked:
+        st.rerun()
+
+    repos = pd.DataFrame(list_saved_repositories())
+    activity = pd.DataFrame(list_github_recent_activity(100))
+    weekly = github_weekly_summary()
+    links = link_github_to_projects()
+
+    st.subheader("Weekly Coding Activity")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        metric_card("Commits", weekly.get("commits", 0))
+    with c2:
+        metric_card("Pull Requests", weekly.get("pull_requests", 0))
+    with c3:
+        metric_card("Issues", weekly.get("issues", 0))
+    with c4:
+        metric_card("Active Repo", weekly.get("active_repo") or "None")
+    with c5:
+        metric_card("Last Pushed", weekly.get("last_pushed_repo") or "None")
+
+    trend = pd.DataFrame(github_activity_trend(30))
+    if not trend.empty:
+        trend = trend.rename(columns={"activity_day": "Date", "activity_type": "Type", "count": "Count"})
+        st.line_chart(trend, x="Date", y="Count", color="Type", use_container_width=True)
+
+    st.subheader("Repositories")
+    if repos.empty:
+        st.info("No repositories synced yet.")
+    else:
+        display_repos = repos[["repo_name", "language", "stars", "forks", "last_pushed_at", "repo_url"]]
+        show_dataframe(display_repos, "No repositories synced yet.")
+
+    st.subheader("Recent Commits, PRs, and Issues")
+    repo_options = ["All"] + (repos["repo_name"].dropna().tolist() if not repos.empty else [])
+    selected_repo = st.selectbox("Repository filter", repo_options)
+    filtered_activity = pd.DataFrame(list_github_recent_activity(100, selected_repo))
+    if filtered_activity.empty:
+        st.info("No GitHub activity synced yet.")
+    else:
+        show_dataframe(
+            filtered_activity[["repo_name", "activity_type", "title", "activity_date", "url"]],
+            "No GitHub activity synced yet.",
+        )
+
+    st.subheader("Project Links")
+    if links:
+        show_dataframe(pd.DataFrame(links), "No repository/project links detected.")
+    else:
+        st.caption("Add GitHub links to projects or use similar project/repo names to help Mythos link activity automatically.")
+
+
+def notes_knowledge_assistant_page() -> None:
+    st.title("Notes & Knowledge Assistant")
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+
+    notes_df = read_table("notes")
+    artifacts_df = read_table("knowledge_artifacts")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_card("Notes", len(notes_df))
+    with c2:
+        metric_card("Artifacts", len(artifacts_df))
+    with c3:
+        flashcards = int(artifacts_df["artifact_type"].fillna("").str.contains("flashcard", case=False).sum()) if not artifacts_df.empty else 0
+        metric_card("Flashcards", flashcards)
+    with c4:
+        revisions = int(artifacts_df["artifact_type"].fillna("").str.contains("revision", case=False).sum()) if not artifacts_df.empty else 0
+        metric_card("Revision Sets", revisions)
+
+    quick_query = st.text_input("Topic or note search", placeholder="JWT, indexing, system design, DP...")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Search & Summarize", use_container_width=True, disabled=not quick_query.strip()):
+            with st.spinner("Searching notes and building summary..."):
+                response = run_health_agent("knowledge_assistant", f"Search and summarize notes for: {quick_query}")
+            st.session_state.knowledge_last_response = response
+    with c2:
+        if st.button("Generate Revision Questions", use_container_width=True, disabled=not quick_query.strip()):
+            with st.spinner("Generating revision questions..."):
+                response = run_health_agent("knowledge_assistant", f"Generate revision questions for: {quick_query}")
+            st.session_state.knowledge_last_response = response
+    with c3:
+        if st.button("Connect Across Tracks", use_container_width=True, disabled=not quick_query.strip()):
+            with st.spinner("Connecting related notes..."):
+                response = run_health_agent("knowledge_assistant", f"Connect notes and learning tracks related to: {quick_query}")
+            st.session_state.knowledge_last_response = response
+
+    prompt = st.chat_input("Ask to search, summarize, create flashcards, or revise a topic")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Calling knowledge tools..."):
+                response = run_health_agent("knowledge_assistant", prompt)
+            st.write(response)
+
+    last_response = st.session_state.get("knowledge_last_response", "")
+    if last_response:
+        st.subheader("Latest Knowledge Output")
+        st.write(last_response)
+
+    st.subheader("Recent Knowledge Messages")
+    for message in get_recent_chat_messages("knowledge_assistant", 8):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    st.subheader("Knowledge Artifacts")
+    show_dataframe(artifacts_df, "No knowledge artifacts saved yet.")
+
+    with st.expander("Recent knowledge assistant tool logs"):
+        logs = pd.DataFrame(get_recent_tool_logs("knowledge_assistant", 50))
+        show_dataframe(logs, "No knowledge assistant tool logs yet.")
+
+
+def ai_command_center_page() -> None:
+    st.title("Mythos")
+    st.caption("Your personal AI command center for study, health, projects, notes, and interview prep.")
+    settings = get_voice_settings()
+
+    for message in get_recent_unified_chat(10):
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    voice_enabled = st.toggle("Voice Mode", value=st.session_state.get("voice_mode_enabled", False))
+    st.session_state.voice_mode_enabled = voice_enabled
+
+    if voice_enabled:
+        st.subheader("Voice Mode")
+        if not os.getenv("OPENAI_API_KEY"):
+            st.error("OpenAI API key not found. Please add OPENAI_API_KEY to your environment.")
+        if bool(settings.get("startup_greeting_enabled", 1)):
+            greeting = mythos_startup_greeting()
+            st.info(greeting)
+            if bool(settings.get("autoplay_enabled", 1)) and st.session_state.get("last_voice_greeting") != date.today().isoformat():
+                try:
+                    greeting_audio = generate_voice_response(greeting, settings)
+                    st.audio(greeting_audio, format="audio/mp3", autoplay=True)
+                    st.session_state.last_voice_greeting = date.today().isoformat()
+                except Exception:
+                    pass
+
+        st.caption("Click the microphone, speak naturally, review the transcript, then send it to Mythos.")
+
+        with st.expander("Voice Settings", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                voice_name = st.selectbox(
+                    "Voice",
+                    ["onyx", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "sage", "shimmer"],
+                    index=["onyx", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "sage", "shimmer"].index(settings.get("voice_name", "onyx"))
+                    if settings.get("voice_name", "onyx") in ["onyx", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "sage", "shimmer"]
+                    else 0,
+                )
+            with c2:
+                stt_model = st.selectbox(
+                    "Speech-to-text",
+                    ["gpt-4o-mini-transcribe", "whisper-1"],
+                    index=0 if settings.get("stt_model", "gpt-4o-mini-transcribe") != "whisper-1" else 1,
+                )
+            with c3:
+                tts_model = st.selectbox(
+                    "Text-to-speech",
+                    ["gpt-4o-mini-tts", "tts-1"],
+                    index=0 if settings.get("tts_model", "gpt-4o-mini-tts") != "tts-1" else 1,
+                )
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                speaking_speed = st.slider("Speaking speed", 0.75, 1.25, float(settings.get("speaking_speed", 0.95) or 0.95), 0.05)
+            with c2:
+                response_style = st.selectbox(
+                    "Response style",
+                    ["concise", "balanced", "detailed"],
+                    index=["concise", "balanced", "detailed"].index(settings.get("response_style", "concise"))
+                    if settings.get("response_style", "concise") in ["concise", "balanced", "detailed"]
+                    else 0,
+                )
+            with c3:
+                autoplay_enabled = st.checkbox("Autoplay", value=bool(settings.get("autoplay_enabled", 1)))
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                transcript_confirmation_enabled = st.checkbox("Confirm transcript", value=bool(settings.get("transcript_confirmation_enabled", 1)))
+            with c2:
+                save_audio_history_enabled = st.checkbox("Save audio history", value=bool(settings.get("save_audio_history_enabled", 1)))
+            with c3:
+                startup_greeting_enabled = st.checkbox("Startup greeting", value=bool(settings.get("startup_greeting_enabled", 1)))
+            if st.button("Save Voice Settings", use_container_width=True):
+                update_voice_settings(
+                    {
+                        "voice_name": voice_name,
+                        "tts_model": tts_model,
+                        "stt_model": stt_model,
+                        "speaking_speed": speaking_speed,
+                        "response_style": response_style,
+                        "autoplay_enabled": autoplay_enabled,
+                        "transcript_confirmation_enabled": transcript_confirmation_enabled,
+                        "save_audio_history_enabled": save_audio_history_enabled,
+                        "startup_greeting_enabled": startup_greeting_enabled,
+                    }
+                )
+                st.success("Voice settings saved.")
+                st.rerun()
+
+        def run_voice_request(transcript_text: str) -> None:
+            response = ""
+            audio_file_path = ""
+            voice_context = get_voice_personality_prompt(settings.get("response_style", "concise"))
+            with st.chat_message("user"):
+                st.write(transcript_text)
+            with st.chat_message("assistant"):
+                try:
+                    with st.spinner("Thinking..."):
+                        response, _routing = execute_command_center_prompt(transcript_text, context_prefix=voice_context)
+                    st.write(response)
+                except Exception as exc:
+                    response = "I ran into an issue while processing that. Please try again, or use text input."
+                    st.error(f"{response} Details: {exc}")
+                try:
+                    with st.spinner("Speaking..."):
+                        audio_bytes = generate_voice_response(response, settings)
+                    if bool(settings.get("save_audio_history_enabled", 1)):
+                        audio_file_path = save_audio_response(audio_bytes)
+                    st.session_state.voice_response_audio = audio_bytes
+                    st.session_state.voice_response_text = response
+                    st.audio(audio_bytes, format="audio/mp3", autoplay=bool(settings.get("autoplay_enabled", 1)))
+                except Exception as exc:
+                    st.info(f"Voice playback is unavailable right now, so I showed the answer as text. Details: {exc}")
+            persist_voice_conversation(
+                transcript_text,
+                response,
+                audio_file_path,
+                settings.get("stt_model", ""),
+                settings.get("tts_model", ""),
+                settings.get("voice_name", ""),
+            )
+
+        quick_commands = [
+            "What should I study today?",
+            "Analyze my diet",
+            "Analyze my workout",
+            "Give me my weekly review",
+            "What are my weak areas?",
+            "Summarize today",
+            "How is my health progress?",
+            "What should I focus on next?",
+        ]
+        st.write("Quick voice commands")
+        quick_cols = st.columns(4)
+        for index, command in enumerate(quick_commands):
+            with quick_cols[index % 4]:
+                if st.button(command, key=f"voice_quick_{index}", use_container_width=True):
+                    run_voice_request(command)
+
+        audio_value = None
+        if hasattr(st, "audio_input"):
+            audio_value = st.audio_input("Microphone")
+        else:
+            st.info("Microphone recording is unavailable in this Streamlit version. Upload a recording or use text chat below.")
+            audio_value = st.file_uploader("Upload a voice recording", type=["wav", "mp3", "m4a", "ogg", "webm"])
+
+        if audio_value is not None:
+            audio_bytes_for_id = audio_value.getvalue()
+            audio_id = f"{getattr(audio_value, 'name', 'recording')}:{len(audio_bytes_for_id)}:{audio_bytes_for_id[:64]!r}"
+        else:
+            audio_id = ""
+
+        if audio_value is not None and st.session_state.get("last_voice_audio_id") != audio_id:
+            st.session_state.last_voice_audio_id = audio_id
+            st.session_state.voice_transcript = ""
+            st.session_state.voice_response_audio = b""
+            st.session_state.voice_response_text = ""
+            try:
+                with st.status("Transcribing voice input...", expanded=False):
+                    st.session_state.voice_transcript = handle_voice_input(audio_value, settings)
+            except Exception as exc:
+                st.warning(f"Voice transcription failed. You can use text input below. Details: {exc}")
+
+        transcript = st.text_area(
+            "Transcript",
+            value=st.session_state.get("voice_transcript", ""),
+            placeholder="Your transcribed voice message will appear here.",
+        )
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            send_label = "Send to Mythos" if bool(settings.get("transcript_confirmation_enabled", 1)) else "Run Voice Command"
+            send_voice = st.button(send_label, use_container_width=True, disabled=not transcript.strip())
+        with c2:
+            clear_voice = st.button("Clear Voice Draft", use_container_width=True)
+
+        if clear_voice:
+            st.session_state.voice_transcript = ""
+            st.session_state.voice_response_text = ""
+            st.session_state.voice_response_audio = b""
+            st.rerun()
+
+        if send_voice:
+            run_voice_request(transcript)
+            st.session_state.voice_transcript = ""
+
+        if st.session_state.get("voice_response_audio"):
+            st.audio(st.session_state.voice_response_audio, format="audio/mp3")
+
+    prompt = st.chat_input("Type if voice is unavailable...")
+    if prompt:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response, _routing = execute_command_center_prompt(prompt)
+            st.write(response)
+        st.rerun()
+
+    with st.expander("Voice conversation history"):
+        show_dataframe(read_table("voice_conversations"), "No voice conversations yet.")
 
 
 def weekly_review_page() -> None:
@@ -1893,7 +3328,7 @@ def health_dashboard_page() -> None:
     with c4:
         metric_card("Diet Logs", len(diet_df))
 
-    st.subheader("Health Manager")
+    st.subheader("Health Overview")
     h1, h2, h3, h4 = st.columns(4)
     with h1:
         metric_card("Latest Health Score", latest_health_score)
@@ -1903,7 +3338,7 @@ def health_dashboard_page() -> None:
         metric_card("Avg Protein", f"{protein_summary.get('avg_protein_g', 0):.0f} g")
     with h4:
         metric_card("Weight Trend", weight_trend.get("trend", "not enough data"))
-    st.caption(latest_recommendation or "Generate a Health Manager Agent report to see the latest recommendation here.")
+    st.caption(latest_recommendation or "Ask Mythos for a health report to see the latest recommendation here.")
 
     if not diet_df.empty:
         latest_diet = diet_df.sort_values(["log_date", "id"]).iloc[-1]
@@ -2396,6 +3831,7 @@ def export_page() -> None:
 
 PAGES = {
     "Dashboard": dashboard,
+    "AI Command Center": ai_command_center_page,
     "Daily Log": daily_log_page,
     "DSA Tracker": dsa_tracker_page,
     "AI Cohort Tracker": ai_cohort_page,
@@ -2404,23 +3840,23 @@ PAGES = {
     "Backend Deep Dive": backend_page,
     "Backend Course Tracker": backend_course_page,
     "Projects Tracker": projects_page,
-    "Project Mentor Agent": project_mentor_agent_page,
     "Notes / Learnings": notes_page,
+    "GitHub Integration": github_integration_page,
+    "Mythos Memory": memory_management_page,
+    "Automations": automations_page,
+    "Notifications": notifications_page,
+    "Observability Center": observability_center_page,
     "Weekly Review": weekly_review_page,
-    "Weekly Review Agent": weekly_review_agent_page,
-    "Learning Coach Agent": learning_coach_agent_page,
     "Export Data": export_page,
     "Health Dashboard": health_dashboard_page,
-    "Health Manager Agent": health_manager_agent_page,
     "Gym Tracker": gym_tracker_page,
-    "Gym Coach Bot": gym_coach_bot_page,
     "Diet Tracker": diet_tracker_page,
-    "Diet Coach Bot": diet_coach_bot_page,
     "Weight & Steps Tracker": weight_steps_tracker_page,
 }
 
 STUDY_PAGES = [
     "Dashboard",
+    "AI Command Center",
     "Daily Log",
     "DSA Tracker",
     "AI Cohort Tracker",
@@ -2429,21 +3865,20 @@ STUDY_PAGES = [
     "Backend Deep Dive",
     "Backend Course Tracker",
     "Projects Tracker",
-    "Project Mentor Agent",
     "Notes / Learnings",
+    "GitHub Integration",
+    "Mythos Memory",
+    "Automations",
+    "Notifications",
+    "Observability Center",
     "Weekly Review",
-    "Weekly Review Agent",
-    "Learning Coach Agent",
     "Export Data",
 ]
 
 HEALTH_PAGES = [
     "Health Dashboard",
-    "Health Manager Agent",
     "Gym Tracker",
-    "Gym Coach Bot",
     "Diet Tracker",
-    "Diet Coach Bot",
     "Weight & Steps Tracker",
 ]
 
@@ -2453,6 +3888,18 @@ def set_current_page(page_name: str) -> None:
 
 
 def configure_openai_key() -> None:
+    env_path = Path(".env")
+    if env_path.exists():
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value and key not in os.environ:
+                os.environ[key] = value
+
     if os.getenv("OPENAI_API_KEY"):
         return
 
@@ -2470,11 +3917,15 @@ def main() -> None:
     configure_openai_key()
     init_db()
     initialize_health_tables()
+    scheduler_tick(lambda prompt: execute_command_center_prompt(prompt)[0], limit=2)
 
     st.sidebar.title(APP_NAME)
     st.sidebar.subheader("Study Timetable & Projects")
     if "current_page" not in st.session_state:
-        st.session_state.current_page = "Dashboard"
+        st.session_state.current_page = "AI Command Center"
+    visible_pages = set(STUDY_PAGES + HEALTH_PAGES)
+    if st.session_state.current_page not in visible_pages:
+        st.session_state.current_page = "AI Command Center"
     for page_name in STUDY_PAGES:
         st.sidebar.button(
             page_name,

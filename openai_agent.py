@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import json
+import time
 from typing import Literal
 
 from openai import OpenAI
 
+from services.memory_service import retrieve_context
+from services.observability_service import log_agent_execution, log_llm_request
 from tools import call_tool, get_recent_chat_messages, save_chat_message, update_gym_session_analysis
 
 
@@ -492,6 +495,19 @@ WEEKLY_REVIEW_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_week_github_summary",
+            "description": "Summarize weekly GitHub commits, pull requests, issues, active repo, and recent activity.",
+            "parameters": {
+                "type": "object",
+                "properties": {"week_start": {"type": "string"}, "week_end": {"type": "string"}},
+                "required": ["week_start", "week_end"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_week_health_summary",
             "description": "Summarize gym, diet, weight, steps, and health metrics for a week.",
             "parameters": {
@@ -605,6 +621,27 @@ PROJECT_MENTOR_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_recent_github_activity",
+            "description": "Read recent synced GitHub commits, pull requests, and issues from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_github_project_links",
+            "description": "Read detected links between GitHub repositories and projects.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_project_roadmap",
             "description": "Generate a deterministic roadmap scaffold for a project from SQLite details.",
             "parameters": {
@@ -650,6 +687,126 @@ PROJECT_MENTOR_TOOLS = [
                 "type": "object",
                 "properties": {"plan": {"type": "object"}},
                 "required": ["plan"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+KNOWLEDGE_ASSISTANT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_notes",
+            "description": "Search notes by title, content, tags, category, or linked track.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_notes_by_category",
+            "description": "Read notes in one category.",
+            "parameters": {
+                "type": "object",
+                "properties": {"category": {"type": "string"}},
+                "required": ["category"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_notes",
+            "description": "Read recent notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_linked_notes",
+            "description": "Read notes linked to a track.",
+            "parameters": {
+                "type": "object",
+                "properties": {"track": {"type": "string"}},
+                "required": ["track"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_note",
+            "description": "Save a new note to SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"note": {"type": "object"}},
+                "required": ["note"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_note",
+            "description": "Summarize one note by id.",
+            "parameters": {
+                "type": "object",
+                "properties": {"note_id": {"type": "integer"}},
+                "required": ["note_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_flashcards",
+            "description": "Generate flashcards from one note.",
+            "parameters": {
+                "type": "object",
+                "properties": {"note_id": {"type": "integer"}},
+                "required": ["note_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_revision_questions",
+            "description": "Generate revision questions for a topic and link related notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {"topic": {"type": "string"}},
+                "required": ["topic"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_knowledge_artifact",
+            "description": "Save a generated summary, flashcard set, revision question set, or connected-notes artifact.",
+            "parameters": {
+                "type": "object",
+                "properties": {"artifact": {"type": "object"}},
+                "required": ["artifact"],
                 "additionalProperties": False,
             },
         },
@@ -713,6 +870,27 @@ RESUME_INTERVIEW_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_github_repositories_summary",
+            "description": "Read synced GitHub repositories, language mix, and latest pushed repository.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_github_activity",
+            "description": "Read recent synced GitHub commits, pull requests, and issues from SQLite.",
+            "parameters": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+                "required": ["limit"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_resume_bullets",
             "description": "Generate resume bullet drafts from project data.",
             "parameters": {
@@ -758,12 +936,16 @@ def run_health_agent(
         "learning_coach",
         "weekly_review",
         "project_mentor",
+        "knowledge_assistant",
         "resume_interview",
     ],
     user_input: str,
 ) -> str:
+    agent_started = time.perf_counter()
     if not os.getenv("OPENAI_API_KEY"):
-        return "OpenAI API key not found. Please add OPENAI_API_KEY to your environment."
+        message = "OpenAI API key not found. Please add OPENAI_API_KEY to your environment."
+        log_agent_execution(bot_type, user_input, int((time.perf_counter() - agent_started) * 1000), False, message)
+        return message
 
     client = OpenAI()
     if bot_type == "gym":
@@ -784,53 +966,77 @@ def run_health_agent(
     elif bot_type == "project_mentor":
         tools = PROJECT_MENTOR_TOOLS
         system_prompt = project_mentor_prompt()
+    elif bot_type == "knowledge_assistant":
+        tools = KNOWLEDGE_ASSISTANT_TOOLS
+        system_prompt = knowledge_assistant_prompt()
     else:
         tools = RESUME_INTERVIEW_TOOLS
         system_prompt = resume_interview_prompt()
+
+    memory_context = retrieve_context(user_input, top_k=5)
+    if memory_context:
+        system_prompt = f"{system_prompt}\n\n{memory_context}\nUse this memory only when relevant. Do not mention memory retrieval unless asked."
 
     save_chat_message(bot_type, "user", user_input)
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(get_recent_chat_messages(bot_type, 10))
     last_saved_gym_session_id = None
 
-    for _ in range(10):
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-        )
-        message = response.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
-
-        if not message.tool_calls:
-            final = message.content or ""
-            if bot_type == "gym" and last_saved_gym_session_id:
-                update_gym_session_analysis(last_saved_gym_session_id, final)
-            save_chat_message(bot_type, "assistant", final)
-            return final
-
-        for tool_call in message.tool_calls:
-            result = call_tool(tool_call.function.name, tool_call.function.arguments, bot_type)
-            if bot_type == "gym" and tool_call.function.name == "save_gym_session":
-                try:
-                    parsed_result = json.loads(result)
-                    if parsed_result.get("saved") and parsed_result.get("session_id"):
-                        last_saved_gym_session_id = int(parsed_result["session_id"])
-                except (TypeError, ValueError):
-                    pass
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "content": result,
-                }
+    try:
+        for _ in range(10):
+            llm_started = time.perf_counter()
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
             )
+            llm_elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+            usage = getattr(response, "usage", None)
+            if usage:
+                log_llm_request(
+                    response.model or MODEL,
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0,
+                    getattr(usage, "total_tokens", 0) or 0,
+                    llm_elapsed_ms,
+                )
+            message = response.choices[0].message
+            messages.append(message.model_dump(exclude_none=True))
 
-    final = "I used the available tools, but the tool-calling loop reached its limit before a final answer."
-    save_chat_message(bot_type, "assistant", final)
-    return final
+            if not message.tool_calls:
+                final = message.content or ""
+                if bot_type == "gym" and last_saved_gym_session_id:
+                    update_gym_session_analysis(last_saved_gym_session_id, final)
+                save_chat_message(bot_type, "assistant", final)
+                log_agent_execution(bot_type, user_input, int((time.perf_counter() - agent_started) * 1000), True)
+                return final
+
+            for tool_call in message.tool_calls:
+                result = call_tool(tool_call.function.name, tool_call.function.arguments, bot_type)
+                if bot_type == "gym" and tool_call.function.name == "save_gym_session":
+                    try:
+                        parsed_result = json.loads(result)
+                        if parsed_result.get("saved") and parsed_result.get("session_id"):
+                            last_saved_gym_session_id = int(parsed_result["session_id"])
+                    except (TypeError, ValueError):
+                        pass
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "content": result,
+                    }
+                )
+
+        final = "I used the available tools, but the tool-calling loop reached its limit before a final answer."
+        save_chat_message(bot_type, "assistant", final)
+        log_agent_execution(bot_type, user_input, int((time.perf_counter() - agent_started) * 1000), False, "tool loop limit reached")
+        return final
+    except Exception as exc:
+        log_agent_execution(bot_type, user_input, int((time.perf_counter() - agent_started) * 1000), False, str(exc))
+        raise
 
 
 def gym_prompt() -> str:
@@ -997,11 +1203,12 @@ For every weekly review request:
 5. Call get_week_system_design_summary(week_start, week_end).
 6. Call get_week_backend_summary(week_start, week_end).
 7. Call get_week_project_summary(week_start, week_end).
-8. Call get_week_health_summary(week_start, week_end).
-9. Call get_previous_week_review().
-10. Call calculate_weekly_consistency_score().
-11. Call calculate_burnout_risk().
-12. Call save_weekly_review(review).
+8. Call get_week_github_summary(week_start, week_end).
+9. Call get_week_health_summary(week_start, week_end).
+10. Call get_previous_week_review().
+11. Call calculate_weekly_consistency_score().
+12. Call calculate_burnout_risk().
+13. Call save_weekly_review(review).
 
 The saved review object must include:
 - week_start
@@ -1022,7 +1229,7 @@ Review requirements:
 - Identify wins and missed targets.
 - Detect burnout risk.
 - Recommend next week's focus.
-- Balance study, gym, diet, sleep, and office workload.
+- Balance study, coding/project activity, gym, diet, sleep, and office workload.
 - Use specific numbers from tool results.
 - If logs are sparse, say what was missing and avoid pretending precision.
 
@@ -1033,6 +1240,7 @@ Final answer structure:
 - Biggest misses.
 - Weak areas.
 - Health and recovery notes.
+- GitHub/project momentum.
 - Next week focus.
 - Practical recommendations.
 
@@ -1052,10 +1260,12 @@ For every project mentor request:
 4. Call get_project_notes(project_id).
 5. Call get_recent_project_progress(limit=5).
 6. Call get_related_learning_topics(project_id).
-7. Call generate_project_roadmap(project_id).
-8. Call generate_next_tasks(project_id).
-9. Call generate_project_readme(project_id).
-10. Call save_project_plan(plan).
+7. Call get_recent_github_activity(limit=20).
+8. Call get_github_project_links().
+9. Call generate_project_roadmap(project_id).
+10. Call generate_next_tasks(project_id).
+11. Call generate_project_readme(project_id).
+12. Call save_project_plan(plan).
 
 The saved plan object must include:
 - project_id
@@ -1072,6 +1282,7 @@ Mentor requirements:
 - Identify missing portfolio features.
 - Suggest README improvements.
 - Link project work with backend, system design, and AI cohort learning.
+- Use synced GitHub commits, PRs, and issues to judge actual coding momentum when available.
 - Explain how to position the project on a resume.
 - Use concrete project data from tools.
 - If no projects exist, tell the user to create a project first and do not claim a plan was saved.
@@ -1085,9 +1296,51 @@ Final answer structure:
 - Missing portfolio features and risks.
 - README improvements.
 - Related learning topics.
+- GitHub activity signals.
 - Resume angle.
 
 Do not claim a project plan was saved unless save_project_plan returned saved=true.
+"""
+
+
+def knowledge_assistant_prompt() -> str:
+    return """
+You are Rushikesh's Notes & Knowledge Assistant for interview revision and connected learning.
+You must use tools before answering. Do not answer from memory only.
+
+For search or knowledge review requests:
+1. Call search_notes(query) or get_recent_notes(limit=10).
+2. Call get_linked_notes(track) or get_notes_by_category(category) when the user mentions a track/category.
+3. If a specific note_id is available, call summarize_note(note_id).
+4. For flashcards, call generate_flashcards(note_id).
+5. For topic revision, call generate_revision_questions(topic).
+6. Save useful generated output with save_knowledge_artifact(artifact).
+
+The saved artifact object must include:
+- artifact_type
+- source_type
+- source_id
+- title
+- content
+- tags
+
+Assistant requirements:
+- Search and summarize notes.
+- Generate flashcards.
+- Generate revision questions.
+- Connect related notes across DSA, backend, system design, AI cohort, and projects.
+- Help revise topics before interviews.
+- If no notes are found, suggest exactly what note to add next.
+- Use note ids and titles from tool results when possible.
+
+Final answer structure:
+- What I found.
+- Summary or revision output.
+- Cross-links across tracks.
+- Interview revision focus.
+- Saved artifact id if available.
+
+Do not claim an artifact was saved unless save_knowledge_artifact returned saved=true.
 """
 
 
@@ -1104,7 +1357,9 @@ For readiness or resume requests:
 4. Call get_backend_readiness().
 5. Call get_ai_cohort_summary().
 6. Call get_recent_weekly_reviews(limit=4).
-7. Call generate_resume_bullets(project_id) when resume bullets are requested, or project_id can be omitted.
+7. Call get_github_repositories_summary().
+8. Call get_recent_github_activity(limit=20).
+9. Call generate_resume_bullets(project_id) when resume bullets are requested, or project_id can be omitted.
 
 For mock interview requests:
 1. Call the readiness tools above.
@@ -1124,6 +1379,7 @@ The saved session object must include:
 Assessment requirements:
 - Assess Backend SDE2 readiness using backend, system design, DSA, and project portfolio evidence.
 - Assess AI Engineer readiness using AI cohort progress, AI-related projects, notes, and weekly reviews.
+- Use synced GitHub activity as proof of project consistency and portfolio freshness.
 - Give a numeric readiness summary when possible.
 - Recommend weak areas to improve.
 - Generate resume bullets that are honest and based on tracked project data.

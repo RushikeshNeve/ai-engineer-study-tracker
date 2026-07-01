@@ -6,6 +6,10 @@ env/
 .env
 .streamlit/secrets.toml
 study_tracker.db
+*.db-journal
 *.sqlite
 *.sqlite3
+voice_audio/
+.mythos_runtime/
+*.lnk
 .DS_Store
